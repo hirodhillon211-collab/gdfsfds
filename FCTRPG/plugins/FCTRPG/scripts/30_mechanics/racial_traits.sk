@@ -1,0 +1,250 @@
+# ============================================================
+# FCTRPG :: 30_mechanics/racial_traits.sk
+# Racial trait handlers (Constitution #6/#7).
+# The race registry's traitKey field routes into ONE handler
+# family per race here — traits are mechanical languages, not
+# flat stat bonuses. Systems elsewhere call these functions;
+# they never inline race checks (single source of truth, #68).
+#
+# Public API:
+#   fctrpg_trait_key(p)                  -> trait key for race
+#   fctrpg_offense_modifier(p, etype)    -> damage multiplier
+#   fctrpg_defense_modifier(p, dtype)    -> incoming damage multiplier
+#   fctrpg_healing_modifier(p)           -> healing received multiplier
+#   fctrpg_environment_modifier(p)       -> passive tick adjustments
+# ============================================================
+
+function fctrpg_trait_key(p: player) :: text:
+    return {fctrpg::reg::race::%fctrpg_race(arg(1))%::5}
+
+# ------------------------------------------------------------
+# OFFENSE: multipliers applied to the player's outgoing damage
+# based on the target's enemy type (matrix already applied in
+# combat.sk — this layer adds racial voice on top).
+# ------------------------------------------------------------
+function fctrpg_offense_modifier(p: player, etype: text) :: number:
+    set {_t} to fctrpg_trait_key(arg(1))
+    if {_t} is "stoneblood":
+        # Dwarrow: dense frame hammers constructs and undead.
+        if arg(2) is "construct" or "undead":
+            return 1.25
+        return 1
+    else if {_t} is "drakeheart":
+        # Draconic: fire resonance — bonus vs anything that burns.
+        if arg(2) is "plant" or "beast":
+            return 1.15
+        return 1
+    else if {_t} is "colossus":
+        # Giant: raw force scales with might, precision suffers.
+        set {_m} to fctrpg_effective(arg(1), "might")
+        return (1 + ({_m} * 0.015))
+    else if {_t} is "feral_senses":
+        # Beastkin: reading a creature gives edge against beasts.
+        if arg(2) is "beast":
+            return 1.2
+        return 1
+    else if {_t} is "abyssal":
+        # Deepborn: prey in water is theirs.
+        if arg(2) is "waterborne":
+            return 1.3
+        return 1
+    else if {_t} is "radiance":
+        # Seraphic: light sears what darkness made.
+        if arg(2) is "undead" or "voidspawn":
+            return 1.2
+        return 1
+    else if {_t} is "faewild":
+        # Fae: reality bends easier around soft targets...
+        if arg(2) is "aberration" or "elemental":
+            return 1.15
+        # ...but iron-forged order resists them (see defense too).
+        if arg(2) is "construct":
+            return 0.85
+        return 1
+    else if {_t} is "voidtouched":
+        # Voidborn: familiar with the unnatural.
+        if arg(2) is "voidspawn" or "undead":
+            return 1.15
+        return 1
+    else if {_t} is "sporebound":
+        # Mycelian: decay allies with decay.
+        if arg(2) is "plant" or "living":
+            return 1.1
+        return 1
+    else if {_t} is "adaptability":
+        # Human: after studying a foe (bestiary known), small edge.
+        if fctrpg_knows(arg(1), "bestiary_%arg(2)%"):
+            return 1.1
+        return 1
+    return 1
+
+# ------------------------------------------------------------
+# DEFENSE: multiplier on incoming damage by damage type.
+# Called from combat.sk's defense branch. Weaknesses are real.
+# ------------------------------------------------------------
+function fctrpg_defense_modifier(p: player, dtype: text) :: number:
+    set {_t} to fctrpg_trait_key(arg(1))
+    set {_mul} to 1
+    if {_t} is "stoneblood":
+        if arg(2) is "bludgeoning":
+            set {_mul} to ({_mul} * 0.8)
+        if arg(2) is "shock":
+            # Dense frame conducts poorly... mostly.
+            set {_mul} to ({_mul} * 1.1)
+    else if {_t} is "faewild":
+        if arg(2) is "bludgeoning" or "piercing":
+            # Cold iron bite abstracted as mundane forged weapons.
+            set {_mul} to ({_mul} * 1.25)
+    else if {_t} is "undeath":
+        if arg(2) is "holy":
+            set {_mul} to ({_mul} * 1.5)
+        if arg(2) is "poison" or "bleed":
+            set {_mul} to 0
+    else if {_t} is "wildshape":
+        if arg(2) is "fire":
+            set {_mul} to ({_mul} * 1.2)
+    else if {_t} is "sporebound":
+        if arg(2) is "fire":
+            set {_mul} to ({_mul} * 1.4)
+        if arg(2) is "poison":
+            set {_mul} to ({_mul} * 0.5)
+    else if {_t} is "elementbody":
+        # Elemental: resistance matches affinity, weakness opposes.
+        if arg(2) is "fire":
+            set {_mul} to ({_mul} * 0.7)
+        if arg(2) is "ice":
+            set {_mul} to ({_mul} * 1.3)
+    else if {_t} is "abyssal":
+        if arg(2) is "ice":
+            set {_mul} to ({_mul} * 0.6)
+        if arg(2) is "shock":
+            set {_mul} to ({_mul} * 1.2)
+    else if {_t} is "voidtouched":
+        if arg(2) is "void":
+            set {_mul} to ({_mul} * 0.6)
+        else:
+            set {_mul} to ({_mul} * 1.1)
+    else if {_t} is "colossus":
+        # Big target: piercing finds gaps in the hide.
+        if arg(2) is "piercing":
+            set {_mul} to ({_mul} * 1.15)
+    # Spirit axis feeds corruption defense globally (Const. #7)
+    if {_t} is "voidtouched":
+        set {_sp} to fctrpg_effective(arg(1), "spirit")
+        set {_mul} to ({_mul} * (1 - min(0.3, {_sp} * 0.02)))
+    return {_mul}
+
+# Apply defense modifiers at event level (kept separate so the
+# offense path in combat.sk stays untouched — regression safe #67).
+on damage:
+    victim is a player
+    attacker is set
+    if {fctrpg::char::%victim's uuid%::status} is "active":
+        set {_dt} to fctrpg_damage_type(victim, attacker, damage cause of event)
+        set {_m} to fctrpg_defense_modifier(victim, {_dt})
+        if {_m} is not 1:
+            set damage of event to ((damage of event) * {_m})
+
+# ------------------------------------------------------------
+# HEALING rules (Constitution #2 interaction principle).
+# Revenants cannot eat healing normally; Mycelians regrow;
+# Sylvans bloom in daylight.
+# ------------------------------------------------------------
+function fctrpg_healing_modifier(p: player) :: number:
+    set {_t} to fctrpg_trait_key(arg(1))
+    if {_t} is "undeath":
+        return 0.5
+    else if {_t} is "sporebound":
+        # Regrowth: stronger at night, weaker under sun.
+        if time of world "world" >= 23000 or time of world "world" <= 3000:
+            return 1.3
+        return 0.9
+    else if {_t} is "wildshape":
+        if day time of world "world" is true:
+            return 1.15
+        return 1
+    else if {_t} is "abyssal":
+        if arg(1) is in water:
+            return 1.25
+        return 0.85
+    return 1
+
+on heal:
+    healed entity is a player
+    if {fctrpg::char::%healed entity's uuid%::status} is "active":
+        set heal amount of event to ((heal amount of event) * fctrpg_healing_modifier(healed entity))
+
+# ------------------------------------------------------------
+# PASSIVE ENVIRONMENT TICKS — bounded per-2s loop (#71).
+# Handles movement speed costs, sunlight fragility, elemental
+# environment power swings, bargain synergy hooks.
+# ------------------------------------------------------------
+every 2 seconds:
+    loop all players:
+        if {fctrpg::char::%loop-player-1's uuid%::status} is "active":
+            fctrpg_trait_tick(loop-player)
+
+function fctrpg_trait_tick(p: player):
+    set {_t} to fctrpg_trait_key(arg(1))
+    # Dwarrow: slower baseline movement (applied via potion refresh)
+    if {_t} is "stoneblood":
+        add 4 seconds of slowness given by amplifier 0 to arg(1) hidden
+    # Mimic: identity instability — rare flicker debuff while wearing armor
+    else if {_t} is "shapeshift":
+        if arg(1) is wearing iron or diamond chestplate:
+            if random integer out of 10 is 0:
+                add 2 seconds of blindness given by amplifier 0 to arg(1)
+    # Chimeric: instability cost — random minor sickness when corrupted
+    else if {_t} is "chimera":
+        if fctrpg_corruption(arg(1)) >= 3:
+            add 2 seconds of nausea given by amplifier 0 to arg(1)
+    # Elemental: environment-dependent power (attunement resource)
+    else if {_t} is "elementbody":
+        if arg(1)'s world is world "world_nether":
+            fctrpg_res_set(arg(1), "attunement", min(100, (fctrpg_res(arg(1), "attunement") + 6)))
+        else if arg(1) is in water:
+            fctrpg_res_set(arg(1), "attunement", min(100, (fctrpg_res(arg(1), "attunement") + 4)))
+        else:
+            fctrpg_res_set(arg(1), "attunement", max(0, (fctrpg_res(arg(1), "attunement") - 2)))
+    # Voidborn: ambient corruption accrual in dangerous realms
+    else if {_t} is "voidtouched":
+        if {fctrpg::region::%arg(1)'s chunk%} is "hollow_expanse":
+            set {fctrpg::cond::corruption::%arg(1)'s uuid%} to (({fctrpg::cond::corruption::%arg(1)'s uuid%} or 0) + 1)
+    # Seraphic fall hook / Binder synergy handled by their own systems.
+    # Mycelian: sunlight fragility — brief burning in high noon
+    else if {_t} is "sporebound":
+        set {_time} to time of world arg(1)'s world
+        if {_time} > 6000 and {_time} < 18000:
+            if sky light of arg(1) >= 14:
+                if block above arg(1) is air:
+                    add 1 second of burning given by amplifier 0 to arg(1)
+
+# ------------------------------------------------------------
+# Sylvan wildshape / Beastkin senses: beast bond synergy.
+# (First-kill bestiary discovery lives in combat.sk — do not
+# duplicate it here; this handler only feeds the mastery axis.)
+# ------------------------------------------------------------
+on death of animal:
+    attacker is a player
+    if {fctrpg::char::%attacker's uuid%::status} is "active":
+        if fctrpg_trait_key(attacker) is "wildshape" or "feral_senses":
+            fctrpg_mastery_gain(attacker, "beast_husbandry", 1)
+
+# ------------------------------------------------------------
+# Revenant social cost: negative faction reactions (Const. #41
+# placeholder — reputation hook point kept singular here).
+# ------------------------------------------------------------
+on join:
+    if fctrpg_trait_key(player) is "undeath":
+        if not fctrpg_knows(player, "revenant_ostracism"):
+            fctrpg_learn(player, "revenant_ostracism")
+            send "&8» &7The living smell death on you. Some doors will close." to player
+
+# ------------------------------------------------------------
+# Fae bargain synergy: contracts bind deeper for the Fae
+# (Binder contract discount hook — read by future binder file).
+# ------------------------------------------------------------
+function fctrpg_bargain_bonus(p: player) :: number:
+    if fctrpg_trait_key(arg(1)) is "faewild":
+        return 1.5
+    return 1

@@ -1,0 +1,442 @@
+# ============================================================
+# FCTRPG :: 40_items/forging.sk
+# Forging as EXPERIMENTATION (Constitution #29/#30/#31).
+#
+#   Exploration -> Materials -> Knowledge -> Forging
+#               -> Equipment -> Build
+#
+# Outcomes are computed from MATERIAL PROPERTY VECTORS
+# (density|flexibility|conductivity|heatres|resonance|
+#  toxicity|stability|affinity) plus technique, knowledge,
+# forge quality and risk. NEVER "click button -> predetermined
+# stronger item". Failures produce waste, strange alloys,
+# unstable equipment, curses — and sometimes DISCOVERIES.
+#
+# Sidegrade rule (#29): every forged stat is a tradeoff drawn
+# from the same property budget. Higher damage means lower
+# something else; that is arithmetic, not flavor text.
+#
+# State (authoritative, see 00_core/state.sk conventions):
+#   {fctrpg::forge::<uuid>::heat}          current session heat
+#   {fctrpg::know::materials_*}            knowledge flags
+#   {fctrpg::item::<serial>::*}            forged item ledger
+# ============================================================
+
+options:
+    forge-anvil-block: iron_block
+
+# ------------------------------------------------------------
+# Property vector accessors (registry is the single source).
+# Field order: key|display|density|flexibility|conductivity|
+#              heatres|resonance|toxicity|stability|affinity
+# ------------------------------------------------------------
+function fctrpg_mat_prop(mat: text, prop: integer) :: number:
+    set {_v} to {fctrpg::reg::material::%arg(1)%::%arg(2)%}
+    if {_v} is not set:
+        return 0
+    return ({_v} as number)
+
+function fctrpg_mat_affinity(mat: text) :: text:
+    set {_a} to {fctrpg::reg::material::%arg(1)%::10}
+    if {_a} is not set:
+        return "none"
+    return "%{_a}%" parsed as text
+
+# Combine two material vectors into a blended profile.
+# Blending is NOT averaging: resonance & conductivity superline
+# when affinities match, stability suffers when they clash.
+# This is where emergent alloy behavior lives (Const. #58).
+function fctrpg_blend(m1: text, m2: text, u: text):
+    set {_p::*} to "density", "flexibility", "conductivity", "heatres", "resonance", "toxicity", "stability"
+    set {_a1} to fctrpg_mat_affinity(arg(1))
+    set {_a2} to fctrpg_mat_affinity(arg(2))
+    loop {_p::*}:
+        set {_x} to fctrpg_mat_prop(arg(1), (index of loop-value) + 2)
+        set {_y} to fctrpg_mat_prop(arg(2), (index of loop-value) + 2)
+        set {_avg} to ({_x} + {_y}) / 2
+        # matched affinities push extremes; clashes destabilize
+        if {_a1} is {_a2}:
+            if loop-value is "resonance" or "conductivity":
+                set {_avg} to min(10, ({_avg} + 1.5))
+        else:
+            if {_a1} is not "none" and {_a2} is not "none":
+                if loop-value is "stability":
+                    set {_avg} to max(0, ({_avg} - 2))
+        set {fctrpg::blend::%loop-value%} to {_avg}
+    # Dominant affinity carries; void+life annihilate to "unbound"
+    if {_a1} is {_a2}:
+        set {fctrpg::blend::affinity} to {_a1}
+    else if ({_a1} is "void" and {_a2} is "light") or ({_a1} is "light" and {_a2} is "void"):
+        set {fctrpg::blend::affinity} to "unbound"
+        if player with uuid arg(3) is set:
+            fctrpg_learn(player with uuid arg(3), "alloy_unbound")
+    else:
+        set {fctrpg::blend::affinity} to {_a1}
+
+# ------------------------------------------------------------
+# Technique knowledge tree (Const. #31: knowledge feeds forging).
+# Learned through play: experimenting, appraising, reading ruins.
+# Each technique unlocks a new axis of outcome control.
+# ------------------------------------------------------------
+function fctrpg_techniques() :: list of strings:
+    return ("basic_smith", "quench_oil", "fold_pattern", "resonance_bind", "void_temper")
+
+function fctrpg_has_technique(p: player, tech: text) :: boolean:
+    if arg(2) is "basic_smith":
+        return true
+    return fctrpg_knows(arg(1), "forge_tech_%arg(2)%")
+
+function fctrpg_technique_power(p: player) :: number:
+    set {_n} to 0
+    loop fctrpg_techniques():
+        if fctrpg_has_technique(arg(1), loop-value):
+            add 1 to {_n}
+    return {_n}
+
+# ------------------------------------------------------------
+# Forge station: right-click an iron block with ≥2 ore items.
+# GUI lets you pick two materials + technique + risk dial.
+# Risk dial: conservative | standard | reckless  (Const. #31
+# "risk" input; higher risk widens the outcome distribution —
+# better ceilings, worse failures, discovery chance up.)
+# ------------------------------------------------------------
+command /giveore <text>:
+    permission: fctrpg.admin
+    description: Grant forge-stock ore of a registry material
+    trigger:
+        set {_key} to "%arg(1)%" parsed as text
+        set {_ore} to {fctrpg::reg::material::%{_key}%::oreitem}
+        if {_ore} is not set:
+            send "&cNo material &f%{_key}%&c in registry."
+            stop
+        add 1 of {_ore} to player's inventory
+        send "&aReceived: &fOre of %fctrpg_reg("material", {_key}, 2)%&a."
+
+on right click on iron block:
+    player's tool is air
+    name of player's world is "world"
+    # Only open forge when carrying potential stock
+    set {_has} to false
+    loop all items in player's inventory:
+        if name of loop-item contains "&bOre of ":
+            set {_has} to true
+            exit loop
+    if {_has} is false:
+        stop
+    fctrpg_open_forge(player)
+
+function fctrpg_open_forge(p: player):
+    set {_inv} to a new virtual chest inventory with 4 rows named "&8⚒ &nForge Experiment"
+    # Slot 13: forge status | slots 10-27: carried ore picks
+    # Slot 31: risk dial | slot 40: ignite
+    set {fctrpg::forge::viewheat} to fctrpg_forge_heat(arg(1))
+    set {fctrpg::forge::viewtech} to round(fctrpg_technique_power(arg(1)))
+    set slot 13 of {_inv} to blaze powder named "&eForge Heat: &f%fctrpg_forge_heat_name%" with lore "&7Feed it coal (/forgefuel) for quality.", "&7Your technique rank: &f%{fctrpg::forge::viewtech}%"
+    set {_slot} to 10
+    loop all items in arg(1)'s inventory:
+        if name of loop-item contains "&bOre of ":
+            if {_slot} >= 28:
+                exit loop
+            set slot {_slot} of {_inv} to loop-item
+            add 1 to {_slot}
+    set slot 31 of {_inv} to paper named "&eRisk Dial" with lore "&7Left/Right click to change.", "&kRISK:&fstandard"
+    set slot 40 of {_inv} to lava bucket named "&6Ignite Alloy" with lore "&7Combine the TWO selected ores.", "&8Outcomes depend on properties,", "&8technique, forge heat and risk.", "&7Failures are information too."
+    open {_inv} to arg(1)
+
+# Per-player forge session heat: {fctrpg::char::<uuid>::forge::heat}
+# (lives under the authoritative char schema namespace, Const. #68/#75)
+function fctrpg_forge_heat(p: player) :: number:
+    return ({fctrpg::char::%arg(1)%::forge::heat} or 1)
+
+function fctrpg_forge_heat_name() :: text:
+    set {_h} to {fctrpg::forge::viewheat}
+    if {_h} <= 1:
+        return "Dull"
+    else if {_h} is 2:
+        return "Steady"
+    else if {_h} is 3:
+        return "Roaring"
+    return "Forge-star"
+
+command /forgefuel:
+    permission: fctrpg.user
+    description: Feed coal to the communal forge (raises heat tier)
+    trigger:
+        if player has 8 of coal:
+            remove 8 of coal from player's inventory
+            set {fctrpg::char::%player's uuid%::forge::heat} to min(4, (fctrpg_forge_heat(player) + 1))
+            send "&aThe forge accepts your fuel. Heat: &f%fctrpg_forge_heat_name%&a."
+        else:
+            send "&cYou need 8 coal to feed the forge."
+
+# ------------------------------------------------------------
+# Forge GUI routing: selecting two ores then Ignite runs one
+# experimental transaction.
+# ------------------------------------------------------------
+on inventory click:
+    name of event-inventory is "&8⚒ &nForge Experiment":
+        cancel event
+        set {_u} to "%player's uuid%"
+        # Risk dial
+        if clicked slot is 31:
+            set {_cur} to {fctrpg::forge::risk::%{_u}%}
+            if {_cur} is not set:
+                set {_cur} to "standard"
+            if click type is left mouse button click:
+                if {_cur} is "conservative":
+                    set {_cur} to "reckless"
+            else:
+                if {_cur} is "reckless":
+                    set {_cur} to "conservative"
+            set {fctrpg::forge::risk::%{_u}%} to {_cur}
+            set slot 31 of event-inventory to paper named "&eRisk Dial: &f%{_cur}%" with lore "&7Conservative: narrow outcomes, safe fails.", "&7Standard: balanced experiment.", "&7Reckless: wide spread, discoveries AND curses.", "&kRISK:&f%{_cur}%"
+            stop
+        # Material selection (rows 2-3 hold carried ores)
+        if clicked slot >= 10:
+            if clicked slot <= 27:
+                set {_sel} to ({fctrpg::forge::selcount::%{_u}%} or 0)
+                if {_sel} >= 2:
+                    stop
+                set {fctrpg::forge::selitem::%{_u}%::%{_sel}%} to clicked inventory slot
+                set {fctrpg::forge::selcount::%{_u}%} to ({_sel} + 1)
+                set slot of clicked slot of event-inventory to blackstone named "&a✔ Selected" with lore "&7Return to this crucible's memory.", "&kSELMARK:&f%{_u}%"
+                stop
+        # Ignite
+        if clicked slot is 40:
+            if (fctrpg_forge_selcount(player)) < 2:
+                send "&cSelect two ores first." to player
+                stop
+            fctrpg_run_forge_experiment(player)
+            stop
+
+function fctrpg_forge_selcount(p: player) :: number:
+    return ({fctrpg::forge::selcount::%arg(1)'s uuid%} or 0)
+
+# Extract material key from an ore item name "…Ore of <Display>"
+function fctrpg_ore_key(itemname: text) :: text:
+    loop fctrpg_registry_materials():
+        set {_p::*} to split loop-value at "|"
+        if "%{_p[2]}%" is in arg(1):
+            return "%{_p[1]}%" parsed as text
+    return "none"
+
+# ------------------------------------------------------------
+# THE EXPERIMENT TRANSACTION (Const. #31)
+# Inputs: property vectors, technique rank, forge heat, risk.
+# Outputs: weapon/tool whose stats are SIDEGRADES derived from
+# the blend, OR a failure artifact (waste/unstable/cursed/
+# strange alloy/discovery). Deterministic core + controlled
+# variance — never a fixed loot table.
+# ------------------------------------------------------------
+function fctrpg_run_forge_experiment(p: player):
+    set {_u} to "%arg(1)'s uuid%"
+    set {_m1} to fctrpg_ore_key(name of {fctrpg::forge::selitem::%{_u}%::0})
+    set {_m2} to fctrpg_ore_key(name of {fctrpg::forge::selitem::%{_u}%::1})
+    if {_m1} is "none" or {_m2} is "none":
+        send "&cThose are not forgeable stocks." to arg(1)
+        stop
+    # Consume the inputs from inventory (real cost, Const. #20)
+    remove {fctrpg::forge::selitem::%{_u}%::0} from arg(1)'s inventory
+    remove {fctrpg::forge::selitem::%{_u}%::1} from arg(1)'s inventory
+    set {fctrpg::forge::selcount::%{_u}%} to 0
+    delete {fctrpg::forge::selitem::%{_u}%::*}
+    # Blend the vectors (writes {fctrpg::blend::*})
+    fctrpg_blend({_m1}, {_m2}, {_u})
+    set {_den} to {fctrpg::blend::density}
+    set {_fli} to {fctrpg::blend::flexibility}
+    set {_con} to {fctrpg::blend::conductivity}
+    set {_hea} to {fctrpg::blend::heatres}
+    set {_res} to {fctrpg::blend::resonance}
+    set {_tox} to {fctrpg::blend::toxicity}
+    set {_sta} to {fctrpg::blend::stability}
+    set {_aff} to {fctrpg::blend::affinity}
+    set {_tech} to fctrpg_technique_power(arg(1))
+    set {_heat} to fctrpg_forge_heat(arg(1))
+    set {_risk} to {fctrpg::forge::risk::%{_u}%}
+    if {_risk} is not set:
+        set {_risk} to "standard"
+    # ---- Stability check: does the alloy HOLD? ----
+    # Low stability + high resonance + reckless heat => drama.
+    set {_hold} to ({_sta} * 6) + ({_tech} * 8) + ({_heat} * 4)
+    set {_chaos} to ({_res} * 4) + ({_hea} * 2)
+    if {_risk} is "reckless":
+        set {_hold} to ({_hold} - 15)
+        set {_chaos} to ({_chaos} + 15)
+    else if {_risk} is "conservative":
+        set {_hold} to ({_hold} + 15)
+        set {_chaos} to ({_chaos} - 10)
+    set {_roll} to random integer between 1 and 100
+    if {_roll} > {_hold}:
+        # FAILURE PATH — but failure is content, not punishment.
+        fctrpg_forge_failure(arg(1), {_m1}, {_m2}, {_chaos}, {_risk})
+        stop
+    # ---- SUCCESS PATH: build the sidegrade stat sheet ----
+    # Budget model: total "power points" come from the vector sum;
+    # distribution across axes is dictated BY THE PROPERTIES.
+    # Heavy+rigid => damage/slow. Light+flexible => speed/low dmg.
+    # Conductive+resonant => spellfocus/charged. Toxic => poison edge.
+    set {_pp} to ({_den} + {_fli} + {_con} + {_hea} + {_res} + {_tox} + {_sta}) / 7
+    set {_pp} to ({_pp} * (1 + ({_tech} * 0.08)) * (1 + ({_heat} * 0.05)))
+    set {_dmg} to round(({_den} * 0.55) + ({_fli} * 0.1))
+    set {_spd} to round((7 - {_den}) + ({_fli} * 0.4))
+    set {_mag} to round(({_res} * 0.6) + ({_con} * 0.3))
+    set {_def} to round(({_den} * 0.35) + ({_sta} * 0.25))
+    # Tradeoff enforcement (#29): if damage is high, durability drops.
+    set {_dur} to round(80 + (({_sta} - {_dmg}) * 12) + ({_hea} * 4))
+    if {_dur} < 30:
+        set {_dur} to 30
+    # Choose archetype by dominant vector — this is WHY two smiths
+    # making "a sword" get different swords.
+    set {_best} to "blade"
+    if {_mag} > {_dmg} and {_mag} > {_def}:
+        set {_best} to "focus"
+    else if {_spd} > {_dmg}:
+        set {_best} to "swift"
+    else if {_def} >= {_dmg}:
+        set {_best} to "bulwark"
+    set {_serial} to "%random integer between 10000 and 99999%"
+    set {_base} to iron sword
+    if {_best} is "focus":
+        set {_base} to stick
+    else if {_best} is "swift":
+        set {_base} to golden sword
+    else if {_best} is "bulwark":
+        set {_base} to iron axe
+    set {_dispAff} to "%{_aff}%" parsed as text
+    set {_out} to {_base} named "&%fctrpg_aff_color({_aff})%%fctrpg_aff_name({_aff})% %{_best}%" with lore "&8Forged: %fctrpg_reg("material", {_m1}, 2)% + %fctrpg_reg("material", {_m2}, 2)%", "&7Damage &f+%{_dmg}%&7 • Speed &f+%{_spd}%", "&7Magic &f+%{_mag}%&7 • Guard &f+%{_def}%", "&7Durability &f%{_dur}%", "&8Unidentified until Appraised (Const. #32)", "&kFORGEDID:&f%{_serial}%"
+    # Weapon mechanics bound to the ledger entry
+    set {fctrpg::item::%{_serial}%::dmg} to {_dmg}
+    set {fctrpg::item::%{_serial}%::spd} to {_spd}
+    set {fctrpg::item::%{_serial}%::mag} to {_mag}
+    set {fctrpg::item::%{_serial}%::def} to {_def}
+    set {fctrpg::item::%{_serial}%::aff} to "%{_aff}%"
+    set {fctrpg::item::%{_serial}%::tox} to {_tox}
+    set {fctrpg::item::%{_serial}%::appraised} to false
+    set {fctrpg::item::%{_serial}%::maker} to {_u}
+    add {_out} to arg(1)'s inventory
+    close arg(1)'s inventory
+    send "&a⚒ The alloy holds. You unhand a &f%fctrpg_aff_name({_aff})% %{_best}&f&7 — &odifferent&r&7, not merely stronger." to arg(1)
+    fctrpg_mastery_gain(arg(1), "forging", 4 + {_tech})
+    # Knowledge accrual: experimenting teaches materials
+    fctrpg_learn(arg(1), "materials_%{_m1}%")
+    fctrpg_learn(arg(1), "materials_%{_m2}%")
+    if {_risk} is "reckless":
+        fctrpg_mastery_gain(arg(1), "materials", 2)
+
+# Affinity presentation helpers (data-ish, single place)
+function fctrpg_aff_name(a: text) :: text:
+    if arg(1) is "arcane":
+        return "Arcane"
+    else if arg(1) is "elemental":
+        return "Elemental"
+    else if arg(1) is "fire":
+        return "Ember"
+    else if arg(1) is "ice":
+        return "Frost"
+    else if arg(1) is "void":
+        return "Void"
+    else if arg(1) is "life":
+        return "Verdant"
+    else if arg(1) is "death":
+        return "Mourn"
+    else if arg(1) is "decay":
+        return "Blight"
+    else if arg(1) is "light":
+        return "Luminous"
+    else if arg(1) is "unbound":
+        return "Unbound"
+    return "Plain"
+
+function fctrpg_aff_color(a: text) :: text:
+    if arg(1) is "arcane":
+        return "5"
+    else if arg(1) is "fire":
+        return "c"
+    else if arg(1) is "ice":
+        return "b"
+    else if arg(1) is "void":
+        return "d"
+    else if arg(1) is "life":
+        return "a"
+    else if arg(1) is "death" or "decay":
+        return "7"
+    else if arg(1) is "light":
+        return "e"
+    else if arg(1) is "unbound":
+        return "3"
+    return "f"
+
+# ------------------------------------------------------------
+# FAILURE OUTCOMES (Const. #31): waste, unusual materials,
+# unstable equipment, unexpected properties, curses, discoveries.
+# Chaos score decides which kind of "wrong" you get.
+# ------------------------------------------------------------
+function fctrpg_forge_failure(p: player, m1: text, m2: text, chaos: number, risk: text):
+    close arg(1)'s inventory
+    set {_c} to arg(3)
+    if {_c} > 55:
+        # High chaos: the alloy becomes something unintended.
+        if random integer out of 3 is 0:
+            # DISCOVERY — failure as teacher (Const. #31/#44)
+            set {_tech} to "resonance_bind"
+            if fctrpg_has_technique(arg(1), {_tech}):
+                set {_tech} to "void_temper"
+            if not fctrpg_has_technique(arg(1), {_tech}):
+                fctrpg_learn(arg(1), "forge_tech_%{_tech}%")
+                send "&d✦ Your ruined experiment revealed a principle: &f%{_tech}&d. Write it down." to arg(1)
+                fctrpg_mastery_gain(arg(1), "materials", 6)
+                stop
+            # already knew → strange alloy instead
+            set {_strange} to gunpowder named "&dStrange Alloy Dust" with lore "&8Residue of %fctrpg_reg("material", arg(2), 2)% × %fctrpg_reg("material", arg(3), 2)%", "&7Unstable. Alchemists would pay for this.", "&kMAT:&fshadowglass"
+            add {_strange} to arg(1)'s inventory
+            send "&dYour failure produced a &fStrange Alloy Dust&d. Curious." to arg(1)
+            stop
+        # UNSTABLE EQUIPMENT: works great, bites back
+        set {_serial} to "%random integer between 10000 and 99999%"
+        set {_unstable} to iron sword named "&cUnstable %{fctrpg_aff_name(fctrpg_mat_affinity(arg(2)))}% Edge" with lore "&7Damage &f+9&7 (overprovisioned)", "&7Every 10th hit: 1♥ backlash to wielder.", "&8Unidentified until Appraised", "&kFORGEDID:&f%{_serial}%"
+        set {fctrpg::item::%{_serial}%::dmg} to 9
+        set {fctrpg::item::%{_serial}%::unstable} to true
+        set {fctrpg::item::%{_serial}%::aff} to fctrpg_mat_affinity(arg(2))
+        set {fctrpg::item::%{_serial}%::appraised} to false
+        set {fctrpg::item::%{_serial}%::maker} to "%arg(1)'s uuid%"
+        add {_unstable} to arg(1)'s inventory
+        send "&cThe edge holds — barely. It will take its payment." to arg(1)
+        fctrpg_mastery_gain(arg(1), "forging", 2)
+        stop
+    else if {_c} > 30:
+        # CURSED remnant (rare, mostly under reckless risk)
+        if arg(4) is "reckless":
+            if random integer out of 4 is 0:
+                set {_serial} to "%random integer between 10000 and 99999%"
+                set {_cursed} to bone named "&8Cursed Sigil" with lore "&7Grants +4 damage while held.", "&7Grants -1 essence regeneration forever after.", "&8Appraisal may reveal more.", "&kFORGEDID:&f%{_serial}%"
+                set {fctrpg::item::%{_serial}%::cursed} to true
+                set {fctrpg::item::%{_serial}%::appraised} to false
+                add {_cursed} to arg(1)'s inventory
+                send "&8Something looked back from the crucible." to arg(1)
+                fctrpg_learn(arg(1), "curses_encountered")
+                stop
+        # WASTE + lesson
+        set {_slag} to cobbled deepslate named "&7Slag of Two Hopes" with lore "&8%fctrpg_reg("material", arg(2), 2)% + %fctrpg_reg("material", arg(3), 2)%", "&7Waste. Or appraisal stock. Or grit."
+        add {_slag} to arg(1)'s inventory
+        send "&7The alloy crumbled to slag. Note what went wrong." to arg(1)
+        fctrpg_mastery_gain(arg(1), "forging", 1)
+        fctrpg_mastery_gain(arg(1), "materials", 1)
+        stop
+    # MILD failure: just lose the stock, gain the datapoint
+    send "&7The quench cracked cleanly. Nothing salvaged — but your hands learned." to arg(1)
+    fctrpg_mastery_gain(arg(1), "forging", 2)
+
+# ------------------------------------------------------------
+# Unstable weapon backlash tick (read from item ledger)
+# ------------------------------------------------------------
+on damage:
+    attacker is a player
+    victim is a living entity
+    name of attacker's tool contains "Unstable ":
+        set {_hits} to ({fctrpg::unstable::hits::%attacker's uuid%} or 0)
+        add 1 to {_hits}
+        set {fctrpg::unstable::hits::%attacker's uuid%} to {_hits}
+        if {_hits} >= 10:
+            set {fctrpg::unstable::hits::%attacker's uuid%} to 0
+            damage attacker by 2 with magic damage caused by attacker
+            send "&cThe unstable edge collects its tithe." to attacker

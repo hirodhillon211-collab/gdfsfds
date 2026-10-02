@@ -1,0 +1,249 @@
+# ============================================================
+# FCTRPG :: 00_core/registry.sk
+# Central data-driven registries (Constitution #69, #68).
+# Adding races/classes/lines/materials/etc. should mean adding
+# data here, NOT rewriting unrelated systems.
+#
+# Registry entry format:  "key|field1|field2|..."
+# Parsed once at load into {fctrpg::reg::<type>::<key>::*}.
+# ============================================================
+
+options:
+    # Schema version of the persistent state (Constitution #75).
+    db-version: 1
+
+# ------------------------------------------------------------
+# RACE REGISTRY
+# Format: key|display|statBudget|forgePoints|traitKey|notes
+# Traits reference 30_mechanics/racial_traits.sk handlers.
+# ------------------------------------------------------------
+function fctrpg_registry_races() :: list of strings:
+    return:
+        - "human|Human|10|12|adaptability|Balanced baseline; bonus to a single focused discipline"
+        - "dwarrow|Dwarrow|12|10|stoneblood|Dense frame: slower movement, +damage vs constructs/undead, forge affinity"
+        - "sylvan|Sylvan|9|13|wildshape|Bond with creatures; daylight regen; weaker in deep realms"
+        - "draconic|Draconic|11|11|drakeheart|High power ceiling, low durability floor; fire resonance"
+        - "giant|Giant|13|8|colossus|Reach and raw force; precision penalty; slow"
+        - "fae|Fae|8|14|faewild|Reality-bending magic affinity; iron weakness; bargain synergy"
+        - "revenant|Revenant|10|12|undeath|Death-adjacent mechanics; negative faction reactions; no food need"
+        - "beastkin|Beastkin|10|12|feral_senses|Enhanced senses/tracking; Beast synergy; armor comfort penalty"
+        - "elemental|Elemental|9|13|elementbody|Elemental damage/resistance swings; environment-dependent power"
+        - "voidborn|Voidborn|9|13|voidtouched|High risk/reward; corruption accumulation; space distortions"
+        - "mycelian|Mycelian|9|13|sporebound|Decay alchemy synergy; sunlight fragility; regrowth healing"
+        - "seraphic|Seraphic|10|12|radiance|Healing/light magic; fall mechanic toward hidden line"
+        - "deepborn|Deepborn|11|11|abyssal|Pressure/water domain; surface weakness; Deep realm affinity"
+        - "mimic|Mimic|8|15|shapeshift|Item-disguise utility; identity instability debuff"
+        - "chimeric|Chimeric|9|14|chimera|Borrows traits of other races via rare materials; instability cost"
+
+# ------------------------------------------------------------
+# CLASS REGISTRY
+# Format: key|display|primaryResource|combatStyleTag|archetypePhrase
+# ------------------------------------------------------------
+function fctrpg_registry_classes() :: list of strings:
+    return:
+        - "mage|Mage|essence|spellcaster|Manipulation of magical forces"
+        - "warrior|Warrior|momentum|melee|Force, momentum, commitment"
+        - "archer|Archer|focus|ranged|Distance, trajectories, weak points"
+        - "rogue|Rogue|opportunity|stealth|Positioning, deception, exploitation"
+        - "beast|Beast|bond|petmaster|Living creature relationships"
+        - "summoner|Summoner|geass|summoner|Manifestation of supernatural entities"
+        - "elementbound|Elementbound|attunement|elemental|Deep relationships with elemental forces"
+        - "artificer|Artificer|charges|engineering|Devices, mechanisms, engineered solutions"
+        - "warden|Warden|authority|controller|Territory, boundaries, battlefield states"
+        - "seeker|Seeker|insight|explorer|Discovery, investigation, tracking"
+        - "alchemist|Alchemist|reagent|transformer|Reactions, materials, volatile combinations"
+        - "psion|Psion|psi|mind|Perception, focus, sensory manipulation"
+        - "reaver|Reaver|sacrifice|riskdamager|Sacrifice, risk, disproportionate power"
+        - "shaper|Shaper|structure|terrain|Matter, structure, terrain alteration"
+        - "binder|Binder|contract|debuffer|Contracts, conditions, rules"
+        - "harbinger|Harbinger|omen|delayedeffects|Omens, prediction, changing future states"
+
+# ------------------------------------------------------------
+# LINE REGISTRY (initial vertical slice; grows per Constitution #14)
+# Format: classKey|lineKey|display|identitySentence
+# A line must change HOW the class's mechanical language is used.
+# ------------------------------------------------------------
+function fctrpg_registry_lines() :: list of strings:
+    return:
+        - "mage|pyromancer|Pyromancer|Burns essence to stack Scorch; damage scales with enemy burn; punishes stationary fights"
+        - "mage|cryomancer|Cryomancer|Builds Chill on self and foes; slow is a resource; positioning is the game"
+        - "mage|stormcaller|Stormcaller|Overcharge gambles: each cast may refund or detonate stored charge; weather interacts"
+        - "mage|voidweaver|Voidweaver|Trades max essence now for later payoff; corruption economy"
+        - "mage|abjurer|Abjurer|Converts incoming damage into essence; wins by being hit intelligently"
+        - "warrior|vanguard|Vanguard|Momentum builds by advancing; abilities only fire above momentum thresholds"
+        - "warrior|berserker|Berserker|Spends health as a resource; power inversely tied to survival margin"
+        - "warrior|shieldbreaker|Shieldbreaker|Shatters guards/blocking; bonus language vs defended enemies"
+        - "archer|marksman|Marksman|Weak-point shots after Scout reveals them; setup-heavy burst"
+        - "archer|volley_master|Volley Master|Ammo count matters; suppressive patterns control space"
+        - "rogue|assassin|Assassin|Opportunity spent on flank/backstab executions"
+        - "rogue|trickster|Trickster|Opportunity generated by deceiving AI targeting"
+        - "seeker|cartographer|Cartographer|Mapping unknown chunks grants permanent party buffs and lore leads"
+        - "seeker|relic_hunter|Relic Hunter|Appraisal crits; finds hidden dungeon secrets others cannot see"
+
+# ------------------------------------------------------------
+# RESOURCE REGISTRY (Constitution #23)
+# Format: key|display|maxTag|generationTag|spendTag
+# Essence is the UNIVERSAL resource shared across all classes.
+# ------------------------------------------------------------
+function fctrpg_registry_resources() :: list of strings:
+    return:
+        - "essence|Essence|base_100_plus_vitality|universal_slow_tick|universal_spellfloor"
+        - "momentum|Momentum|cap_100|melee_hits_taken_dealt|decays_out_of_combat"
+        - "focus|Focus|cap_tied_precision|stationary_ticks|reset_by_movement"
+        - "opportunity|Opportunity|cap_5|flank_backstab_stealth_events|consumed_per_execute"
+        - "bond|Bond|cap_tied_pet_quality|pet_actions_proximity|shared_damage_sharing"
+        - "geass|Geass|cap_tied_summons|summon_upkeep_events|overdraft_corruption_risk"
+        - "attunement|Attunement|env_dependent|environmental_elements|resets_with_biome"
+        - "charges|Charges|cap_tied_devices|device_builds_repair|spent_on_activations"
+        - "authority|Authority|zone_control_based|holding_ground|lost_on_yield"
+        - "insight|Insight|discovery_based|new_chunks_first_kills_loot|spent_on_reveals"
+        - "reagent|Reagent|material_stock_based|mining_herb_craft|consumed_real_items"
+        - "psi|Psi|cap_tied_will|concentration_ticks|breaks_on_damage"
+        - "sacrifice|Sacrifice|hp_conversion|self_damage|banked_burst"
+        - "structure|Structure|terrain_reading|altering_terrain|spent_on_forms"
+        - "contract|Contract|binding_events|promises_fulfilled|breach_punishment"
+        - "omen|Omen|forecast_events|delayed_casts|cashout_timing_game"
+
+# ------------------------------------------------------------
+# PROFESSION REGISTRY (Constitution #33)
+# Format: key|display|axisTag
+# ------------------------------------------------------------
+function fctrpg_registry_professions() :: list of strings:
+    return:
+        - "appraiser|Appraiser|knowledge"
+        - "blacksmith|Blacksmith|forging"
+        - "alchemist_prof|Alchemist|transmutation"
+        - "merchant|Merchant|economy"
+        - "hunter|Hunter|tracking"
+        - "cartographer_prof|Cartographer|exploration"
+        - "scholar|Scholar|research"
+        - "engineer|Engineer|magitech"
+        - "beast_specialist|Beast Specialist|creatures"
+        - "relic_researcher|Relic Researcher|relics"
+
+# ------------------------------------------------------------
+# MATERIAL REGISTRY (Constitution #30 — properties, not tiers)
+# Format: key|display|density|flexibility|conductivity|heatres|resonance|toxicity|stability|affinity
+# Property values 0..10. Forging outcomes read these vectors.
+# ------------------------------------------------------------
+function fctrpg_registry_materials() :: list of strings:
+    return:
+        - "iron|Iron|7|3|5|6|1|0|8|none"
+        - "steel|Steel|8|4|4|7|1|0|9|none"
+        - "mithral|Mithral|5|7|9|5|8|1|6|arcane"
+        - "orichalcum|Orichalcum|9|2|8|9|9|3|4|elemental"
+        - "shadowglass|Shadowglass|3|1|10|2|10|5|2|void"
+        - "heartwood|Heartwood|2|8|2|2|6|0|7|life"
+        - "frostiron|Frostiron|7|2|6|1|5|0|8|ice"
+        - "embersteel|Embersteel|8|3|5|10|4|2|5|fire"
+        - "boneporcelain|Bone Porcelain|4|2|1|4|7|2|5|death"
+        - "sporehide|Sporehide|3|9|2|1|4|6|3|decay"
+        - "voidite|Voidite|6|0|10|3|10|8|1|void"
+        - "sunsilver|Sun Silver|5|6|9|6|9|0|7|light"
+
+# ------------------------------------------------------------
+# REALM REGISTRY (Constitution #52) — placeholders until Phase 13
+# Format: key|display|hazardTag|drawPhrase
+# ------------------------------------------------------------
+function fctrpg_registry_realms() :: list of strings:
+    return:
+        - "the_verdant_mark|The Verdant Mark|none|Starting region; Sylvan presence; moderate zone"
+        - "ashfall_reaches|Ashfall Reaches|burning_ground|Rare fire materials; Draconic remnants; dangerous region"
+        - "the_deep_coil|The Deep Coil|pressure_dark|Deepborn territory; submerged ruins; dangerous region"
+        - "hollow_expanse|Hollow Expanse|corruption_fields|Voidborn anomalies; unstable magic; dangerous region"
+
+# ------------------------------------------------------------
+# DAMAGE TYPE / ENEMY TYPE MATRIX (Constitution #26)
+# Format: attackerType|targetType|multiplier
+# This table drives combat multipliers. Extend with data only.
+# ------------------------------------------------------------
+function fctrpg_registry_typematrix() :: list of strings:
+    return:
+        - "fire|plant|2.0"
+        - "fire|beast|1.5"
+        - "fire|construct|0.5"
+        - "ice|elemental|1.5"
+        - "ice|beast|1.2"
+        - "shock|construct|1.5"
+        - "shock|waterborne|1.8"
+        - "void|undead|1.5"
+        - "void|living|0.8"
+        - "holy|undead|2.0"
+        - "holy|voidspawn|1.5"
+        - "slashing|plant|1.3"
+        - "piercing|armored|1.4"
+        - "bludgeoning|armored|1.2"
+        - "bludgeoning|undead|1.3"
+
+# ------------------------------------------------------------
+# LOAD / PARSE — builds authoritative lookup tables (Constitution #68)
+# ------------------------------------------------------------
+on load:
+    loop fctrpg_registry_races():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::race::%{_p[1]}%::*} to {_p::*}
+    loop fctrpg_registry_classes():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::class::%{_p[1]}%::*} to {_p::*}
+    loop fctrpg_registry_lines():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::line::%{_p[1]}%::%{_p[2]}%::*} to {_p::*}
+    loop fctrpg_registry_resources():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::resource::%{_p[1]}%::*} to {_p::*}
+    loop fctrpg_registry_professions():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::profession::%{_p[1]}%::*} to {_p::*}
+    loop fctrpg_registry_materials():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::material::%{_p[1]}%::*} to {_p::*}
+    loop fctrpg_registry_realms():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::realm::%{_p[1]}%::*} to {_p::*}
+    loop fctrpg_registry_typematrix():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::typemul::%{_p[1]}%::%{_p[2]}%} to ({_p[3]} as number)
+    # Material acquisition seeds (Const. #31 chain: Exploration ->
+    # Materials). One authoritative ore mapping per material key.
+    # Display name carries the material key for unambiguous lookup.
+    loop fctrpg_registry_materials():
+        set {_p::*} to split loop-value at "|"
+        set {_ore} to raw iron named "&bOre of %{_p[2]}%" with lore "&8FCTRPG material&7 • forge stock", "&kMAT:&f%{_p[1]}%"
+        set {fctrpg::reg::material::%{_p[1]}%::oreitem} to {_ore}
+    set {fctrpg::reg::ready} to true
+    send "&8[FCTRPG] &7Registries loaded: %size of fctrpg_registry_races()% races, %size of fctrpg_registry_classes()% classes, %size of fctrpg_registry_lines()% lines." to console
+
+# ------------------------------------------------------------
+# GENERIC LOOKUP HELPERS (Public API — Constitution #65)
+# ------------------------------------------------------------
+function fctrpg_reg(type: text, key: text, field: integer = 2) :: text:
+    if arg(1) is "race":
+        return {fctrpg::reg::race::%arg(2)%::%arg(3)%}
+    else if arg(1) is "class":
+        return {fctrpg::reg::class::%arg(2)%::%arg(3)%}
+    else if arg(1) is "resource":
+        return {fctrpg::reg::resource::%arg(2)%::%arg(3)%}
+    else if arg(1) is "material":
+        return {fctrpg::reg::material::%arg(2)%::%arg(3)%}
+    else if arg(1) is "profession":
+        return {fctrpg::reg::profession::%arg(2)%::%arg(3)%}
+    else if arg(1) is "realm":
+        return {fctrpg::reg::realm::%arg(2)%::%arg(3)%}
+    else:
+        return ""
+
+function fctrpg_line_field(classKey: text, lineKey: text, field: integer = 3) :: text:
+    return {fctrpg::reg::line::%arg(1)%::%arg(2)%::%arg(3)%}
+
+function fctrpg_type_multiplier(atk: text, def: text) :: number:
+    set {_m} to {fctrpg::reg::typemul::%arg(1)%::%arg(2)%}
+    if {_m} is not set:
+        return 1
+    return {_m}
+
+# Extracts first field (keys) from registry rows.
+function fctrpg_keys_of(rows: list of strings) :: list of strings:
+    loop arg(1):
+        set {_p::*} to split loop-value at "|"
+        add {_p[1]} to {_keys::*}
+    return {_keys::*}

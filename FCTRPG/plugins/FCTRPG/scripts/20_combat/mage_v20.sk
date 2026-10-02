@@ -1,0 +1,284 @@
+# ============================================================
+# FCTRPG :: 20_combat/mage_v20.sk
+# Mage vertical slice — the Phase 5 quality benchmark
+# (Constitution #14, #15, #24).
+#
+# Design intent: skills must alter the DECISION SPACE, not just
+# deal numbers. Each spell interacts with resources, conditions,
+# enemy states, environment, or other skills.
+#
+# Line identity (Const. #14): the chosen LINE changes how the
+# same mechanical language is spoken. Lines are discovered via
+# mastery, then committed with /line (difficulty = commitment,
+# Const. #16).
+#
+# Skill list for Mage V20:
+#   [1] Ember Lance      — fire bolt; stacks Scorch; Pyromancer amplified
+#   [2] Frost Snare      — ground chill; slow = resource (Cryomancer core)
+#   [3] Chain Arc        — shock; bonus vs constructs/waterborne (matrix!)
+#   [4] Aegis Siphon     — no damage; converts recent damage taken→essence
+#   [5] Void Ledger      — borrows max essence now, repays later w/ interest
+# Cast with a staff (stick named via lore) + left/right click patterns.
+# ============================================================
+
+options:
+    mage-key-item: stick
+
+# ------------------------------------------------------------
+# Focus staff binding (placeholder until Forging Phase 10 —
+# later, staves will be forged from registry materials).
+# ------------------------------------------------------------
+command /magistaff:
+    permission: fctrpg.user
+    description: Bind a focus staff to yourself
+    trigger:
+        if fctrpg_class(player) is not "mage":
+            send "&cOnly Mages can bind a focus staff."
+            stop
+        set {_s} to stick named "&6Focus Staff" with lore "&8FCTRPG • Mage focus", "&7Hold + LeftClick mobs: &fEmber Lance&7 (12 essence)", "&7Hold + RightClick ground: &fFrost Snare&7 (15)", "&7Sneak+LeftClick: &fChain Arc&7 (20)", "&7Sneak+RightClick: &fAegis Siphon&7 (free)", "&7Shift-lock RightClick air: &fVoid Ledger&7 (risky!)"
+        add {_s} to player's inventory
+        send "&aFocus staff bound. Reforge it later through &eForging&a to change its soul."
+
+# ------------------------------------------------------------
+# Cast routing
+# ------------------------------------------------------------
+on right click holding a stick:
+    name of player's tool contains "&6Focus Staff":
+        cancel event
+        if player is sneaking:
+            # Sneak + right-click AIR = Void Ledger (debt magic)
+            # Sneak + right-click BLOCK = Aegis Siphon (siphon wounds)
+            if block under player is air:
+                fctrpg_cast_void_ledger(player)
+                stop
+            fctrpg_cast_aegis_siphon(player)
+            stop
+        if clicked block is set:
+            fctrpg_cast_frost_snare(player, clicked block)
+
+on left click holding a stick:
+    name of player's tool contains "&6Focus Staff":
+        # Let normal attack events pass through to the damage system.
+        if event is an attack event:
+            stop
+        cancel event
+        if player is sneaking:
+            fctrpg_cast_chain_arc(player)
+            stop
+        set {_t} to target of player limited to 20 blocks
+        if {_t} is an entity:
+            fctrpg_cast_ember_lance(player, {_t})
+
+# ------------------------------------------------------------
+# [1] EMBER LANCE — decision: spend now or stack Scorch?
+# Base: 6 + mind*0.8 fire damage. Applies Burning.
+# Pyromancer line: each cast adds Scorch(1) to target (max 5);
+#   Scorch multiplies the NEXT cast's damage by (1+0.25*stacks)
+#   but consumes half the stacks → burst-vs-sustain choice.
+# Cryomancer casters instead gain Chill on self (identity bleed
+# between lines is intentional hybrid fuel, Const. #18).
+# ------------------------------------------------------------
+function fctrpg_cast_ember_lance(p: player, t: entity):
+    if not fctrpg_res_spend(arg(1), "essence", 12):
+        send "&cNot enough Essence." to arg(1)
+        stop
+    set {_mind} to fctrpg_effective(arg(1), "mind")
+    set {_dmg} to (6 + ({_mind} * 0.8))
+    set {_scorch} to ({fctrpg::cond::scorch::%uuid of arg(2)%} or 0)
+    if fctrpg_line(arg(1)) is "pyromancer":
+        set {_dmg} to ({_dmg} * (1 + (0.25 * {_scorch})))
+        if {_scorch} > 0:
+            set {fctrpg::cond::scorch::%uuid of arg(2)%} to floor({_scorch} / 2)
+        else:
+            set {fctrpg::cond::scorch::%uuid of arg(2)%} to min(5, {_scorch} + 1)
+    else:
+        set {fctrpg::cond::scorch::%uuid of arg(2)%} to min(5, {_scorch} + 1)
+    # Type matrix applies automatically via damage event (fire × etype)
+    damage arg(2) by {_dmg} with fire damage caused by arg(1)
+    add 3 seconds of burning given by amplifier 0 to arg(2)
+    play animated flame at location of arg(2)
+    fctrpg_mastery_gain(arg(1), "magic", 2)
+    if fctrpg_line(arg(1)) is "cryomancer":
+        set {fctrpg::cond::chill::%arg(1)'s uuid%} to (({fctrpg::cond::chill::%arg(1)'s uuid%} or 0) + 1)
+
+# ------------------------------------------------------------
+# [2] FROST SNARE — terrain as a weapon (Const. #25)
+# Creates a 3-block radius chilled patch for 8s. Standing in it:
+#   - enemies: slowness II + ice-type damage ticks (matrix active)
+#   - Cryomancers: GAIN Chill stacks instead (positioning game)
+# Decision: you give up range and instant damage for space control.
+# ------------------------------------------------------------
+function fctrpg_cast_frost_snare(p: player, b: block):
+    if not fctrpg_res_spend(arg(1), "essence", 15):
+        send "&cNot enough Essence." to arg(1)
+        stop
+    set {_id} to "%random integer between 100000 and 999999%" parsed as text
+    set {fctrpg::snare::%{_id}%::loc} to location of arg(2)
+    set {fctrpg::snare::%{_id}%::caster} to arg(1)'s uuid
+    # Bounded lifetime — pulses are scheduled per-snare, never a
+    # global per-tick scan (Constitution #71).
+    loop 16 times:
+        wait 0.5 seconds
+        fctrpg_snare_pulse({_id}, arg(1))
+    delete {fctrpg::snare::%{_id}%::*}
+
+function fctrpg_snare_pulse(id: text, p: player):
+    set {_loc} to {fctrpg::snare::%arg(1)%::loc}
+    if {_loc} is not set:
+        stop
+    loop entities in radius 3 around {_loc}:
+        set {_e} to loop-entity
+        if {_e} is a living entity:
+            if {fctrpg::char::%{_e}'s uuid%} is set:
+                # It's an RPG player — caster standing in own snare
+                if "%{_e}'s uuid%" is "%{fctrpg::snare::%arg(1)%::caster}%":
+                    if fctrpg_line({_e}) is "cryomancer":
+                        set {fctrpg::cond::chill::%{_e}'s uuid%} to (({fctrpg::cond::chill::%{_e}'s uuid%} or 0) + 1)
+            else:
+                add 1 second of slowness given by amplifier 1 to {_e}
+                damage {_e} by (2 + (fctrpg_effective(arg(2), "mind") * 0.3)) with frost damage caused by arg(2)
+    draw particles, 20 dust options color rgb 120, 200, 255, size 0.5, offset vector 3, 0.2, 3 at {_loc}
+
+# Chill payoff (Cryomancer identity): spent on big spells for bonus,
+# or passively slows your attacker-swings. Read by other systems.
+function fctrpg_chill(p: player) :: number:
+    return ({fctrpg::cond::chill::%arg(1)'s uuid%} or 0)
+
+# ------------------------------------------------------------
+# [3] CHAIN ARC — the matrix showcase (Const. #26)
+# Hits primary + up to 2 nearby enemies. Shock type means:
+#   constructs x1.5, waterborne x1.8, but living x1.0.
+# Stormcaller overcharge gamble: 25% chance costs 0 essence AND
+# adds Charge(1); 25% chance detonates ALL charge for bonus dmg.
+# ------------------------------------------------------------
+function fctrpg_cast_chain_arc(p: player):
+    set {_cost} to 20
+    set {_bonus} to 0
+    if fctrpg_line(arg(1)) is "stormcaller":
+        set {_roll} to random integer out of 4
+        if {_roll} is 0:
+            set {_cost} to 0
+            set {fctrpg::cond::charge::%arg(1)'s uuid%} to (({fctrpg::cond::charge::%arg(1)'s uuid%} or 0) + 1)
+            send "&b⚡ Overcharge: this cast was free." to arg(1)
+        else if {_roll} is 3:
+            set {_c} to ({fctrpg::cond::charge::%arg(1)'s uuid%} or 0)
+            if {_c} > 0:
+                set {_bonus} to ({_c} * 4)
+                delete {fctrpg::cond::charge::%arg(1)'s uuid%}
+                send "&b⚡ Detonation! +%{_bonus}% damage." to arg(1)
+    if not fctrpg_res_spend(arg(1), "essence", {_cost}):
+        send "&cNot enough Essence." to arg(1)
+        stop
+    set {_t} target of arg(1)
+    if {_t} is not set:
+        stop
+    set {_mind} to fctrpg_effective(arg(1), "mind")
+    set {_dmg} to (5 + ({_mind} * 0.6) + {_bonus})
+    damage {_t} by {_dmg} with lightning damage caused by arg(1)
+    set {_hits} to 0
+    loop entities in radius 6 around location of {_t}:
+        if {_hits} >= 2:
+            exit loop
+        set {_e} to loop-entity
+        if {_e} is not {_t}:
+            if {_e} is a living entity:
+                damage {_e} by ({_dmg} * 0.5) with lightning damage caused by arg(1)
+                add 1 to {_hits}
+    fctrpg_mastery_gain(arg(1), "magic", 2)
+
+# ------------------------------------------------------------
+# [4] AEGIS SIPHON — Abjurer's engine (Const. #14)
+# Free cast. Converts damage taken in the last ~8 seconds into
+# essence at 40% rate (Abjurer: 80%). Rewards being hit
+# intelligently — tanky timing IS the gameplay.
+# The ledger is written by the damage event in combat.sk.
+# ------------------------------------------------------------
+function fctrpg_aegis_record(p: player, amount: number):
+    add arg(2) to {fctrpg::aegis::%arg(1)'s uuid%::total}
+    set {fctrpg::aegis::%arg(1)'s uuid%::t} to now
+
+function fctrpg_cast_aegis_siphon(p: player):
+    set {_sum} to ({fctrpg::aegis::%arg(1)'s uuid%::total} or 0)
+    delete {fctrpg::aegis::%arg(1)'s uuid%::*}
+    set {_rate} to 0.4
+    if fctrpg_line(arg(1)) is "abjurer":
+        set {_rate} to 0.8
+    set {_gain} to floor({_sum} * {_rate})
+    if {_gain} <= 0:
+        send "&7Nothing to siphon. Stand in the storm first." to arg(1)
+        stop
+    fctrpg_res_set(arg(1), "essence", (fctrpg_res(arg(1), "essence") + {_gain}))
+    send "&d◈ Siphoned &f%{_gain}% &dessence from your wounds." to arg(1)
+
+# ------------------------------------------------------------
+# [5] VOID LEDGER — debt magic (Voidweaver identity)
+# Instantly gain 60 essence now; the void repays itself by
+# reclaiming half of what remains after 30s, and every loan adds
+# Corruption(1). Corruption ≥5 triggers a Void Surge: a harmful
+# warp unless a spirit save holds. High ceiling, real cost
+# (Const. #7 tradeoffs, #20 hybrid costs).
+# ------------------------------------------------------------
+function fctrpg_cast_void_ledger(p: player):
+    fctrpg_res_set(arg(1), "essence", (fctrpg_res(arg(1), "essence") + 60))
+    set {fctrpg::void::debt::%arg(1)'s uuid%} to (({fctrpg::void::debt::%arg(1)'s uuid%} or 0) + 60)
+    set {fctrpg::cond::corruption::%arg(1)'s uuid%} to (({fctrpg::cond::corruption::%arg(1)'s uuid%} or 0) + 1)
+    send "&5▓ The void lends freely. It always collects." to arg(1)
+    # repayment: drain over time
+    wait 30 seconds
+    set {_d} to ({fctrpg::void::debt::%arg(1)'s uuid%} or 0)
+    if {_d} > 0:
+        fctrpg_res_set(arg(1), "essence", max(0, fctrpg_res(arg(1), "essence") - floor({_d} * 0.5)))
+        set {fctrpg::void::debt::%arg(1)'s uuid%} to 0
+        send "&5Debt collectors arrive. Essence reclaimed." to arg(1)
+    if fctrpg_corruption(arg(1)) >= 5:
+        fctrpg_void_surge(arg(1))
+
+function fctrpg_corruption(p: player) :: number:
+    return ({fctrpg::cond::corruption::%arg(1)'s uuid%} or 0)
+
+function fctrpg_void_surge(p: player):
+    delete {fctrpg::cond::corruption::%arg(1)'s uuid%}
+    set {_save} to random integer out of 10
+    if {_save} < fctrpg_effective(arg(1), "spirit"):
+        send "&dYour spirit holds the door shut." to arg(1)
+        stop
+    tp arg(1) 8 blocks in direction of random vector between -1 and 1, -0.2, -1 and 1
+    damage arg(1) by 6 with void damage
+    send "&c✖ VOID SURGE tears through you." to arg(1)
+    fctrpg_learn(arg(1), "void_surge_experienced")
+
+# ------------------------------------------------------------
+# Line discovery + commitment (Const. #14/#16/#22)
+# Lines reveal themselves after mastery thresholds; committing is
+# deliberately hard (costs essence cap reset + a rare token later).
+# ------------------------------------------------------------
+command /line:
+    permission: fctrpg.user
+    description: View or commit to a discovered line
+    trigger:
+        if fctrpg_class(player) is not "mage":
+            send "&cLines await your class's own voice."
+            stop
+        if arg(1) is not set:
+            send "&eAvailable lines:"
+            loop fctrpg_registry_lines():
+                set {_p::*} to split loop-value at "|"
+                if {_p[1]} is "mage":
+                    send "&8 - &6%{_p[3]}%&7: %{_p[4]}%"
+            send "&7Commit with &f/line <key>&7. Commitment is difficult to undo."
+            stop
+        set {_key} to "%arg(1)%" parsed as text
+        set {_disp} to fctrpg_line_field("mage", {_key}, 3)
+        if {_disp} is not set:
+            send "&cThat line does not exist."
+            stop
+        # Gate: requires magic mastery 5 (discovery through play)
+        if fctrpg_mastery_level(player, "magic") < 5:
+            send "&cYour Magic mastery (&f5&c required) has not opened this path yet."
+            stop
+        if fctrpg_line(player) is not "none":
+            send "&cYou already walk the %fctrpg_line(player)% line. Respecialization demands rare powers."
+            stop
+        set {fctrpg::char::%player's uuid%::line} to "%{_key}%" parsed as text
+        send "&6&l✦ &aYou commit to the &6{_disp}&a line. Your magic will never speak the same way." to player
+        fctrpg_learn(player, "line_%{_key}%")
