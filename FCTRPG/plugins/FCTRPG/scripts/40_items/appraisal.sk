@@ -1,0 +1,202 @@
+# ============================================================
+# FCTRPG :: 40_items/appraisal.sk
+# Appraisal makes KNOWLEDGE valuable (Constitution #32).
+#
+# Information levels for every forged/relic item:
+#   Unknown -> Partially Understood -> Identified -> Deeply Understood
+#
+# Each level is earned by the Appraiser skill (profession axis,
+# Const. #33) plus time spent carrying/using the item. Appraisal
+# is NOT busywork: one deliberate cast per item, gated by skill;
+# deeper levels require REPEATED engagement (use it, study it).
+#
+# Knowledge payoff loop (#2 systems interact):
+#   - Identified items reveal true stats to the WIELDER only
+#     (information asymmetry feeds economy, Const. #48)
+#   - Deeply Understood grants forging/material mastery refunds
+#   - Relic Hunter line appraises critically (Const. #14)
+#   - Cursed items can HIDE until appraisal catches them
+#
+# State:
+#   {fctrpg::item::<serial>::appraised}      identified flag
+#   {fctrpg::item::<serial>::depth::<uuid>}  0..3 per observer
+# ============================================================
+
+# ------------------------------------------------------------
+# Item serial extraction (single authoritative parser — #68).
+# Forged items carry "&kFORGEDID:<serial>" in lore.
+# ------------------------------------------------------------
+function fctrpg_item_serial(i: item) :: text:
+    loop lores of arg(1):
+        if loop-value contains "&kFORGEDID:&f":
+            set {_p::*} to split loop-value at "&kFORGEDID:&f"
+            return "%{_p[2]}%" parsed as text
+    return "none"
+
+function fctrpg_appraise_depth(p: player, serial: text) :: number:
+    return ({fctrpg::item::%arg(2)%::depth::%arg(1)'s uuid%} or 0)
+
+function fctrpg_appraise_level_name(d: number) :: text:
+    if arg(1) <= 0:
+        return "&8Unknown"
+    else if arg(1) is 1:
+        return "&7Partially Understood"
+    else if arg(1) is 2:
+        return "&eIdentified"
+    return "&dDeeply Understood"
+
+# ------------------------------------------------------------
+# Appraisal skill gate (Const. #33 profession axis).
+# Level = appraisal mastery; each depth tier demands more.
+# Relic Hunters appraise one tier cheaper (line synergy #14).
+# ------------------------------------------------------------
+function fctrpg_appraise_power(p: player) :: number:
+    set {_base} to fctrpg_mastery_level(arg(1), "appraisal")
+    set {_mind} to fctrpg_effective(arg(1), "mind")
+    set {_bonus} to floor({_mind} / 4)
+    if fctrpg_line(arg(1)) is "relic_hunter":
+        set {_bonus} to ({_bonus} + 2)
+    return {_base} + {_bonus}
+
+# ------------------------------------------------------------
+# The cast: hold item, /appraise. One transaction, real cost
+# (essence + attention). Never auto-reveals everything.
+# ------------------------------------------------------------
+command /appraise:
+    permission: fctrpg.user
+    description: Appraise the item in your hand
+    trigger:
+        if not fctrpg_is_created(player):
+            send "&cYour identity must be forged before your craft can be."
+            stop
+        set {_it} to player's tool
+        if {_it} is air:
+            send "&cHold the object you wish to understand."
+            stop
+        set {_serial} to fctrpg_item_serial({_it})
+        if {_serial} is "none":
+            # Not an RPG-ledgered object — but experts notice more.
+            if fctrpg_appraise_power(player) >= 4:
+                send "&7This object predates our ledger. It carries no maker's mark — that itself is information." to player
+                fctrpg_learn(player, "unmarked_objects")
+            else:
+                send "&7You see only what anyone sees: an ordinary thing." to player
+            stop
+        if not fctrpg_res_spend(player, "essence", 10):
+            send "&cAppraisal costs 10 essence of concentration." to player
+            stop
+        set {_depth} to fctrpg_appraise_depth(player, {_serial})
+        set {_power} to fctrpg_appraise_power(player)
+        # Tier requirements rise with depth; crits skip a rung.
+        set {_need} to ({_depth} * 3) + 1
+        set {_crit} to false
+        if fctrpg_line(player) is "relic_hunter":
+            if random integer out of 5 is 0:
+                set {_crit} to true
+                send "&6✦ Relic Hunter instinct: the object confesses early." to player
+        if {_power} < {_need} and {_crit} is false:
+            set {_gap} to ({_need} - {_power})
+            # Partial pass even on failure — knowledge accrues.
+            if {_depth} is 0:
+                set {fctrpg::item::%{_serial}%::depth::%player's uuid%} to 1
+                fctrpg_appraise_reveal(player, {_serial}, 1)
+            send "&7Your understanding stalls &f%{_gap}%&7 rungs short. But you now know its shape..." to player
+            fctrpg_mastery_gain(player, "appraisal", 1)
+            stop
+        set {_new} to min(3, {_depth} + 1)
+        if {_crit} and {_new} < 3:
+            set {_new} to min(3, {_new} + 1)
+        set {fctrpg::item::%{_serial}%::depth::%player's uuid%} to {_new}
+        if {_new} >= 2:
+            set {fctrpg::item::%{_serial}%::appraised} to true
+        fctrpg_appraise_reveal(player, {_serial}, {_new})
+        fctrpg_mastery_gain(player, "appraisal", 2 + {_new})
+        # Deep understanding feeds back into the maker's circles
+        # (Const. #10 invisible tether: appraisal -> relic_knowledge)
+        if {_new} is 3:
+            fctrpg_learn(player, "deep_understanding_%{_serial}%")
+            fctrpg_mastery_gain(player, "materials", 2)
+
+# ------------------------------------------------------------
+# Reveal content BY LEVEL (Const. #80 information design:
+# show what was learned, never overwhelm with the whole sheet).
+# ------------------------------------------------------------
+function fctrpg_appraise_reveal(p: player, serial: text, depth: number):
+    set {_aff} to {fctrpg::item::%arg(2)%::aff}
+    set {_lvlName} to fctrpg_appraise_level_name(arg(3))
+    send "&8» Appraisal: %{_lvlName}&r&8 »" to arg(1)
+    if arg(3) is 1:
+        send "&7It was shaped by hands — affinity signature: &f%fctrpg_aff_name({_aff})%&7." to arg(1)
+        stop
+    if arg(3) is 2:
+        set {_d} to ({fctrpg::item::%arg(2)%::dmg} or 0)
+        set {_m} to ({fctrpg::item::%arg(2)%::mag} or 0)
+        send "&7True numbers surface: Damage &f+%{_d}%&7, Magic &f+%{_m}%&7." to arg(1)
+        # Hidden instability becomes visible BEFORE it bites (#31)
+        if {fctrpg::item::%arg(2)%::unstable} is true:
+            send "&cWarning: lattice is unstable. It will take payment from its wielder." to arg(1)
+            fctrpg_learn(arg(1), "unstable_lattice")
+        stop
+    if arg(3) is 3:
+        set {_tox} to ({fctrpg::item::%arg(2)%::tox} or 0)
+        send "&dYou read the whole story of this object." to arg(1)
+        if {fctrpg::item::%arg(2)%::cursed} is true:
+            # CURSE EXPOSURE: appraisal protects the unwary (#32/#44)
+            send "&8The curse stands revealed: &f%soul_hunger_desc({arg(2)})%&8." to arg(1)
+            set {fctrpg::item::%arg(2)%::curse_known} to true
+            fctrpg_learn(arg(1), "curse_read")
+        else if {_tox} >= 5:
+            send "&7Toxic residue detected — alchemists would want this stock." to arg(1)
+            fctrpg_learn(arg(1), "toxic_stock_%arg(2)%")
+        stop
+
+function soul_hunger_desc(serial: text) :: text:
+    return "a slow debt upon essence regeneration"
+
+# ------------------------------------------------------------
+# Usage-based passive study: wielding an unknown item teaches
+# slowly (play > menus, Const. #8/#9). Bounded check on damage.
+# ------------------------------------------------------------
+on damage:
+    attacker is a player
+    if {fctrpg::char::%attacker's uuid%::status} is not "active":
+        stop
+    set {_serial} to fctrpg_item_serial(attacker's tool)
+    if {_serial} is "none":
+        stop
+    set {_hits} to ({fctrpg::study::%attacker's uuid%::%{_serial}%} or 0)
+    add 1 to {_hits}
+    set {fctrpg::study::%attacker's uuid%::%{_serial}%} to {_hits}
+    # Every 40 hits of use = free rung up to Partially Understood
+    if {_hits} is 40:
+        if fctrpg_appraise_depth(attacker, {_serial}) is 0:
+            set {fctrpg::item::%{_serial}%::depth::%attacker's uuid%} to 1
+            send "&8» &7After %{_hits}% strikes, the weapon feels less foreign. &7(&oPartially Understood&r&7)" to attacker
+
+# ------------------------------------------------------------
+# Cursed sigil hidden effect — active only while UNKNOWN.
+# Once exposed by appraisal, the debt stops accruing (knowledge
+# is literally protective — Const. #32 "knowledge should be useful").
+# ------------------------------------------------------------
+every 10 seconds:
+    loop all players:
+        if {fctrpg::char::%loop-player-1's uuid%::status} is "active":
+            loop all items in loop-player's inventory:
+                set {_serial} to fctrpg_item_serial(loop-item)
+                if {_serial} is not "none":
+                    if {fctrpg::item::%{_serial}%::cursed} is true:
+                        if {fctrpg::item::%{_serial}%::curse_known} is not true:
+                            fctrpg_res_set(loop-player, "essence", max(0, (fctrpg_res(loop-player, "essence") - 1)))
+
+# ------------------------------------------------------------
+# Merchant information asymmetry hook (Const. #48 placeholder):
+# identified items sell better than unknown ones. Read by the
+# future economy file; defined here so appraisal owns its output.
+# ------------------------------------------------------------
+function fctrpg_appraise_value_multiplier(p: player, serial: text) :: number:
+    set {_d} to fctrpg_appraise_depth(arg(1), arg(2))
+    if {_d} >= 2:
+        return 1.25
+    else if {_d} is 1:
+        return 1.05
+    return 0.8

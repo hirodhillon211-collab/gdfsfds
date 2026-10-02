@@ -1,0 +1,347 @@
+# ============================================================
+# FCTRPG :: 10_character/character_creation.sk
+# Character creation flow (Constitution #11):
+#   name/appearance -> race -> racial forging -> starting stats
+#   -> class. Everything else reveals itself through play.
+# GUI-based, minimal menus, no overwhelm.
+#
+# Skript version target: 2.9+ (SkriptGUI-style "format gui slot"
+# is replaced here by plain virtual-inventory handling to keep
+# dependencies to Skript + vanilla Bukkit only.)
+#
+# State written here (authoritative — see 00_core/state.sk):
+#   {fctrpg::char::<uuid>::status}  needs_creation|forging|stats|class|active
+#   {fctrpg::char::<uuid>::racial::<axis>} forged values
+#   {fctrpg::char::<uuid>::stats::<axis>}  earned values
+# ============================================================
+
+options:
+    forge-baseline: 2
+    stat-pool: 8
+
+# ------------------------------------------------------------
+# Commands (thin routers; logic lives in functions)
+# ------------------------------------------------------------
+command /rpg:
+    permission: fctrpg.user
+    description: Open your character / begin creation
+    trigger:
+        if {fctrpg::char::%player's uuid%::status} is "needs_creation":
+            fctrpg_gui_race_choice(player)
+        else if {fctrpg::char::%player's uuid%::status} is "forging":
+            fctrpg_gui_racial_forge(player)
+        else if {fctrpg::char::%player's uuid%::status} is "stats":
+            fctrpg_gui_stat_alloc(player)
+        else if {fctrpg::char::%player's uuid%::status} is "class":
+            fctrpg_gui_class_choice(player)
+        else:
+            fctrpg_gui_character_sheet(player)
+
+command /rpgsheet:
+    permission: fctrpg.user
+    description: View your character sheet
+    trigger:
+        fctrpg_gui_character_sheet(player)
+
+# ------------------------------------------------------------
+# STEP 1 — RACE CHOICE
+# Virtual chest GUI built with plain Skript inventory handling.
+# Click routing uses the shared click handler below; each item's
+# lore line 1 stores the race key for unambiguous mapping.
+# ------------------------------------------------------------
+function fctrpg_gui_race_choice(p: player):
+    set {_inv} to a new virtual chest inventory with 2 rows named "&8✦ &nChoose Your Race"
+    set {_slot} to 0
+    loop fctrpg_registry_races():
+        set {_parts::*} to split loop-value at "|"
+        set {_item} to paper named "&6%{_parts[2]}%" with lore "&7%{_parts[6]}%", "", "&eStat Budget: &f%{_parts[3]}%", "&eForge Points: &f%{_parts[4]}", "&kKEY:&f%{_parts[1]}%", "&8Click to become %{_parts[2]}%."
+        set slot {_slot} of {_inv} to {_item}
+        add 1 to {_slot}
+    open {_inv} to arg(1)
+
+# ------------------------------------------------------------
+# Shared GUI click router for creation menus.
+# Keys are embedded in lore so we never rely on slot math.
+# ------------------------------------------------------------
+on inventory click:
+    event-inventory is not player's inventory
+    name of event-inventory contains "&8✦ &nChoose Your Race":
+        cancel event
+        set {_lore::*} to lores of clicked inventory slot
+        loop {_lore::*}:
+            loop-value contains "&kKEY:&f":
+                set {_key} to last text after split loop-value at "&kKEY:&f"
+                fctrpg_pick_race(player, "%{_key}%" parsed as text)
+        stop
+    name of event-inventory contains "&8⚒ &nRacial Forging":
+        cancel event
+        fctrpg_forge_click(player, click type, clicked slot)
+        stop
+    name of event-inventory contains "&8◆ &nStarting Attributes":
+        cancel event
+        fctrpg_stat_click(player, click type, clicked slot)
+        stop
+    name of event-inventory contains "&8✦ &nChoose Your Class":
+        cancel event
+        set {_lore::*} to lores of clicked inventory slot
+        loop {_lore::*}:
+            loop-value contains "&kKEY:&f":
+                set {_key} to last text after split loop-value at "&kKEY:&f"
+                fctrpg_pick_class(player, "%{_key}%" parsed as text)
+        stop
+
+on inventory drag:
+    name of event-inventory starts with "&8":
+        cancel event
+
+function fctrpg_pick_race(p: player, key: text):
+    if {fctrpg::reg::race::%arg(2)%} is not set:
+        stop
+    set {fctrpg::char::%arg(1)%::race} to "%arg(2)%" parsed as text
+    set {fctrpg::char::%arg(1)%::status} to "forging"
+    set {fctrpg::char::%arg(1)%::racial::pool} to ({fctrpg_reg("race", arg(2), 4)} or 12)
+    close arg(1)'s inventory
+    send "&aYou are now &f%{fctrpg::reg::race::%arg(2)%::2}%&a. Forge your foundation: &e/rpg" to arg(1)
+    wait 2 ticks
+    fctrpg_gui_racial_forge(arg(1))
+
+# ------------------------------------------------------------
+# STEP 2 — RACIAL FORGING (Constitution #7)
+# Six axes, free allocation from the race's forge-point pool.
+# Tradeoff rule: points ABOVE baseline cost double. Freedom is
+# real, but extreme configurations demand extreme sacrifices.
+# Slots: 10=might 11=agility 12=vitality 13=mind 14=spirit
+#        15=presence | 22 = finalize
+# ------------------------------------------------------------
+function fctrpg_forge_axes() :: list of strings:
+    return ("might", "agility", "vitality", "mind", "spirit", "presence")
+
+function fctrpg_forge_value(p: player, axis: text) :: number:
+    return ({fctrpg::char::%arg(1)%::racial::%arg(2)%} or options'forge-baseline')
+
+function fctrpg_forge_spent(p: player) :: number:
+    set {_s} to 0
+    loop fctrpg_forge_axes():
+        set {_v} to fctrpg_forge_value(arg(1), loop-value)
+        if {_v} <= options'forge-baseline':
+            set {_s} to ({_s} + {_v})
+        else:
+            set {_s} to ({_s} + options'forge-baseline' + (({_v} - options'forge-baseline') * 2))
+    return {_s}
+
+function fctrpg_forge_next_cost(p: player, axis: text) :: number:
+    if fctrpg_forge_value(arg(1), arg(2)) < options'forge-baseline':
+        return 1
+    return 2
+
+function fctrpg_forge_axis_desc(axis: text) :: string:
+    if arg(1) is "might":
+        return "&8Melee force, carry weight, break resistance"
+    else if arg(1) is "agility":
+        return "&8Speed, dodge, weapon handling"
+    else if arg(1) is "vitality":
+        return "&8Health, essence capacity, endurance"
+    else if arg(1) is "mind":
+        return "&8Spell power, appraisal, learning rate"
+    else if arg(1) is "spirit":
+        return "&8Resistances, bond strength, corruption defense"
+    else if arg(1) is "presence":
+        return "&8Reputation gain, trade terms, leadership"
+    return ""
+
+function fctrpg_forge_icon(axis: text) :: item:
+    if arg(1) is "might":
+        return iron sword named " "
+    else if arg(1) is "agility":
+        return feather named " "
+    else if arg(1) is "vitality":
+        return apple named " "
+    else if arg(1) is "mind":
+        return book named " "
+    else if arg(1) is "spirit":
+        return ender pearl named " "
+    else if arg(1) is "presence":
+        return gold ingot named " "
+    return stone named " "
+
+function fctrpg_gui_racial_forge(p: player):
+    set {_inv} to a new virtual chest inventory with 3 rows named "&8⚒ &nRacial Forging"
+    fctrpg_render_forge(arg(1), {_inv})
+    open {_inv} to arg(1)
+
+# Re-render without reopening the window (keeps cursor sane).
+function fctrpg_render_forge(p: player, inv: inventory):
+    set {_pool} to ({fctrpg::char::%arg(1)%::racial::pool} or 0)
+    set {_remain} to ({_pool} - fctrpg_forge_spent(arg(1)))
+    set slot 4 of arg(2) to nether star named "&b⚒ %fctrpg_reg("race", fctrpg_race(arg(1)), 2)%" with lore "&7Remaining Forge Points: &f%{_remain}%", "&7Below baseline costs &f1&7, above baseline costs &f2&7.", "&7Every gain demands a sacrifice."
+    set {_slot} to 10
+    loop fctrpg_forge_axes():
+        set {_axis} to loop-value
+        set {_v} to fctrpg_forge_value(arg(1), {_axis})
+        set {_cost} to fctrpg_forge_next_cost(arg(1), {_axis})
+        set slot {_slot} of arg(2) to fctrpg_forge_icon({_axis}) named "&e%{_axis}%: &f%{_v}" with lore "&7Left-click: +1 (&fcost %{_cost}%)", "&7Right-click: -1 (&frefund)", fctrpg_forge_axis_desc({_axis}), "&kAXIS:&f%{_axis}%"
+        add 1 to {_slot}
+    set slot 22 of arg(2) to lime dye named "&a✔ Finalize Foundation" with lore "&7Locks your racial configuration.", "&7Unspent points are lost — spend wisely.", "&kAXIS:&ffinalize"
+
+function fctrpg_forge_click(p: player, ctype: clicktype, slot: number):
+    set {_inv} to event-inventory
+    # Finalize button
+    if arg(3) is 22:
+        if (fctrpg_forge_spent(arg(1)) >= ({fctrpg::char::%arg(1)%::racial::pool} or 0)):
+            send "&cYou must spend every forge point before finalizing." to arg(1)
+            stop
+        set {fctrpg::char::%arg(1)%::status} to "stats"
+        set {fctrpg::char::%arg(1)%::stats::pool} to options'stat-pool
+        close arg(1)'s inventory
+        send "&aFoundation forged. Allocate starting attributes: &e/rpg" to arg(1)
+        wait 2 ticks
+        fctrpg_gui_stat_alloc(arg(1))
+        stop
+    if arg(3) < 10 or arg(3) > 15:
+        stop
+    # Map slot back to axis deterministically
+    set {_axes::*} to fctrpg_forge_axes()
+    set {_idx} to (arg(3) - 9)
+    set {_axis} to "%{_axes[{_idx}]}%" parsed as text
+    set {_pool} to ({fctrpg::char::%arg(1)%::racial::pool} or 0)
+    if arg(2) is left mouse button click:
+        if (fctrpg_forge_spent(arg(1)) + fctrpg_forge_next_cost(arg(1), {_axis})) <= {_pool}:
+            set {fctrpg::char::%arg(1)%::racial::%{_axis}%} to (fctrpg_forge_value(arg(1), {_axis}) + 1)
+    else if arg(2) is right mouse button click:
+        if fctrpg_forge_value(arg(1), {_axis}) > 0:
+            set {fctrpg::char::%arg(1)%::racial::%{_axis}%} to (fctrpg_forge_value(arg(1), {_axis}) - 1)
+    fctrpg_render_forge(arg(1), {_inv})
+
+# ------------------------------------------------------------
+# STEP 3 — STARTING CHARACTER STATS (Constitution #8)
+# Separate from racial stats. Small pool; all further growth
+# comes from PLAY (mastery system), never from menus.
+# ------------------------------------------------------------
+function fctrpg_stat_value(p: player, axis: text) :: number:
+    return ({fctrpg::char::%arg(1)%::stats::%arg(2)%} or 0)
+
+function fctrpg_stat_spent(p: player) :: number:
+    set {_s} to 0
+    loop fctrpg_forge_axes():
+        set {_s} to ({_s} + fctrpg_stat_value(arg(1), loop-value))
+    return {_s}
+
+function fctrpg_gui_stat_alloc(p: player):
+    set {_inv} to a new virtual chest inventory with 3 rows named "&8◆ &nStarting Attributes"
+    fctrpg_render_stats(arg(1), {_inv})
+    open {_inv} to arg(1)
+
+function fctrpg_render_stats(p: player, inv: inventory):
+    set {_pool} to ({fctrpg::char::%arg(1)%::stats::pool} or 0)
+    set {_remain} to ({_pool} - fctrpg_stat_spent(arg(1)))
+    set slot 4 of arg(2) to diamond named "&bStarting Attributes" with lore "&7Remaining points: &f%{_remain}%", "&7These sit on top of your racial foundation.", "&7All future growth comes from &yplay&7, not menus."
+    set {_slot} to 10
+    loop fctrpg_forge_axes():
+        set {_axis} to loop-value
+        set {_v} to fctrpg_stat_value(arg(1), {_axis})
+        set {_r} to fctrpg_forge_value(arg(1), {_axis})
+        set slot {_slot} of arg(2) to fctrpg_forge_icon({_axis}) named "&e%{_axis}%: &f%{_v}" with lore "&7Racial &f%{_r}%&7 → Effective &d%{_v} + %{_r}", "&7Left-click: +1   Right-click: -1", "&kAXIS:&f%{_axis}%"
+        add 1 to {_slot}
+    set slot 22 of arg(2) to lime dye named "&a✔ Lock Attributes" with lore "&7Proceed to class selection.", "&kAXIS:&ffinalize"
+
+function fctrpg_stat_click(p: player, ctype: clicktype, slot: number):
+    set {_inv} to event-inventory
+    if arg(3) is 22:
+        if (fctrpg_stat_spent(arg(1)) < ({fctrpg::char::%arg(1)%::stats::pool} or 0)):
+            send "&cAllocate every starting point before locking." to arg(1)
+            stop
+        set {fctrpg::char::%arg(1)%::status} to "class"
+        close arg(1)'s inventory
+        send "&aAttributes locked. Choose a class: &e/rpg" to arg(1)
+        wait 2 ticks
+        fctrpg_gui_class_choice(arg(1))
+        stop
+    if arg(3) < 10 or arg(3) > 15:
+        stop
+    set {_axes::*} to fctrpg_forge_axes()
+    set {_axis} to "%{_axes[(arg(3) - 9)]}%" parsed as text
+    set {_pool} to ({fctrpg::char::%arg(1)%::stats::pool} or 0)
+    if arg(2) is left mouse button click:
+        if fctrpg_stat_spent(arg(1)) < {_pool}:
+            set {fctrpg::char::%arg(1)%::stats::%{_axis}%} to (fctrpg_stat_value(arg(1), {_axis}) + 1)
+    else if arg(2) is right mouse button click:
+        if fctrpg_stat_value(arg(1), {_axis}) > 0:
+            set {fctrpg::char::%arg(1)%::stats::%{_axis}%} to (fctrpg_stat_value(arg(1), {_axis}) - 1)
+    fctrpg_render_stats(arg(1), {_inv})
+
+# ------------------------------------------------------------
+# STEP 4 — CLASS CHOICE (Constitution #12)
+# Class = mechanical vocabulary. Lines come later through play.
+# ------------------------------------------------------------
+function fctrpg_class_icon(key: text) :: item:
+    if arg(1) is "mage":
+        return blaze rod named " "
+    else if arg(1) is "warrior":
+        return iron sword named " "
+    else if arg(1) is "archer":
+        return bow named " "
+    else if arg(1) is "rogue":
+        return golden apple named " "
+    else if arg(1) is "beast":
+        return bone named " "
+    else if arg(1) is "summoner":
+        return eye of ender named " "
+    else if arg(1) is "elementbound":
+        return lava bucket named " "
+    else if arg(1) is "artificer":
+        return redstone named " "
+    else if arg(1) is "warden":
+        return shield named " "
+    else if arg(1) is "seeker":
+        return compass named " "
+    else if arg(1) is "alchemist":
+        return potion named " "
+    else if arg(1) is "psion":
+        return amethyst shard named " "
+    else if arg(1) is "reaver":
+        return rotten flesh named " "
+    else if arg(1) is "shaper":
+        return clay ball named " "
+    else if arg(1) is "binder":
+        return lead named " "
+    else if arg(1) is "harbinger":
+        return clock named " "
+    return stone named " "
+
+function fctrpg_gui_class_choice(p: player):
+    set {_inv} to a new virtual chest inventory with 2 rows named "&8✦ &nChoose Your Class"
+    set {_slot} to 0
+    loop fctrpg_registry_classes():
+        set {_parts::*} to split loop-value at "|"
+        set {_item} to fctrpg_class_icon("%{_parts[1]}%") named "&6%{_parts[2]}%" with lore "&7%{_parts[5]}%", "&eResource: &f%{_parts[3]}%", "&8A class opens a mechanical language.", "&8It does not write your poem for you.", "&kKEY:&f%{_parts[1]}%"
+        set slot {_slot} of {_inv} to {_item}
+        add 1 to {_slot}
+    open {_inv} to arg(1)
+
+function fctrpg_pick_class(p: player, key: text):
+    if {fctrpg::reg::class::%arg(2)%} is not set:
+        stop
+    set {fctrpg::char::%arg(1)%::class} to "%arg(2)%" parsed as text
+    set {fctrpg::char::%arg(1)%::status} to "active"
+    fctrpg_res_set(arg(1), "essence", fctrpg_res_max(arg(1), "essence"))
+    close arg(1)'s inventory
+    send "&6&lFCTRPG&r &aWelcome, %fctrpg_reg("race", fctrpg_race(arg(1)), 2)% %fctrpg_reg("class", arg(2), 2)%&a." to arg(1)
+    send "&7Your line will be discovered through &emastery&a, not chosen here." to arg(1)
+    fctrpg_learn(arg(1), "identity_%arg(2)%")
+
+# ------------------------------------------------------------
+# Character sheet (post-creation hub, read-only)
+# ------------------------------------------------------------
+function fctrpg_gui_character_sheet(p: player):
+    set {_inv} to a new virtual chest inventory with 2 rows named "&8▣ &nCharacter"
+    set {_raceDisp} to fctrpg_reg("race", fctrpg_race(arg(1)), 2)
+    set {_clsDisp} to fctrpg_reg("class", fctrpg_class(arg(1)), 2)
+    set {_line} to fctrpg_line(arg(1))
+    set slot 4 of {_inv} to player head of arg(1) named "&6%arg(1)'s name%" with lore "&eRace: &f%{_raceDisp}%", "&eClass: &f%{_clsDisp}%", "&eLine: &f%{_line}%", "&7Essence: &f%fctrpg_res(arg(1), "essence")%&7/&f%fctrpg_res_max(arg(1), "essence")%"
+    set {_slot} to 0
+    loop fctrpg_forge_axes():
+        set {_axis} to loop-value
+        set {_eff} to fctrpg_effective(arg(1), {_axis})
+        set slot {_slot} of {_inv} to fctrpg_forge_icon({_axis}) named "&e%{_axis}%: &d%{_eff}" with lore "&7Racial: &f%{fctrpg::char::%arg(1)%::racial::%{_axis}% or 0}%", "&7Earned: &f%{fctrpg::char::%arg(1)%::stats::%{_axis}% or 0}%"
+        add 1 to {_slot}
+    open {_inv} to arg(1)

@@ -1,0 +1,199 @@
+# ============================================================
+# FCTRPG :: 20_combat/combat.sk
+# Systemic combat core (Constitution #25, #26):
+#   - damage type × enemy type matrix from registry
+#   - conditions applied by damage types (fire→burning etc.)
+#   - class resource generation hooks
+#   - mastery accrual from fighting (Destiny Board, #9)
+#   - ONE coherent death transaction (#47)
+# ============================================================
+
+# ------------------------------------------------------------
+# Enemy classification (data-driven tag on MythicMobs or vanilla)
+# ------------------------------------------------------------
+function fctrpg_enemy_type(e: entity) :: text:
+    # MythicMobs internal names can carry a suffix like "RuinGuardian|armored"
+    if arg(1) is a mythic creature:
+        set {_n} to arg(1)'s mt-internal name parsed as text
+        if {_n} contains "|":
+            set {_parts::*} to split {_n} at "|"
+            return "%{_parts[2]}%" parsed as text
+    # Vanilla heuristic mapping (bounded, cheap)
+    if arg(1) is a wither skeleton, skeleton, zombie, husk, drowned, phantom or zombified piglin:
+        return "undead"
+    if arg(1) is an iron golem, snow golem or armor stand:
+        return "construct"
+    if arg(1) is a blaze, magma cube:
+        return "elemental"
+    if arg(1) is a creeper, enderman:
+        return "aberration"
+    if arg(1) is an armadillo, turtle or shulker:
+        return "armored"
+    if arg(1) is a cow, pig, sheep, chicken, wolf, fox or deer-like animal:
+        return "beast"
+    if arg(1) is a player:
+        return "living"
+    return "living"
+
+# ------------------------------------------------------------
+# Damage-type inference for the incoming hit.
+# Phase 6 keeps this simple and honest: cause + weapon decide.
+# NOTE: damage-cause comparisons use Skript's "is X" syntax with
+# concrete causes; unknown combinations safely fall through to
+# bludgeoning (never crash, never silently skip the matrix).
+# ------------------------------------------------------------
+function fctrpg_damage_type(victim: entity, attacker: entity, dcause: damage cause) :: text:
+    if arg(3) is fire, flame, lava or hot floor:
+        return "fire"
+    else if arg(3) is freeze:
+        return "ice"
+    else if arg(3) is lightning bolt:
+        return "shock"
+    else if arg(3) is entity attack:
+        if arg(2) is a player:
+            if tool of arg(2) is a sword:
+                return "slashing"
+            else if tool of arg(2) is an axe or mace:
+                return "bludgeoning"
+            else if tool of arg(2) is a trident:
+                return "piercing"
+            return "bludgeoning"
+        return "bludgeoning"
+    else if arg(3) is projectile:
+        return "piercing"
+    return "bludgeoning"
+
+# ------------------------------------------------------------
+# Core damage event
+# ------------------------------------------------------------
+on damage:
+    attacker is set
+    victim is a living entity
+    attacker is not victim
+    # --- Damage scaling: stats + type matrix (Const. #8/#24/#26) ---
+    if attacker is a player:
+        if fctrpg_is_created(attacker):
+            set {_dtype} to fctrpg_damage_type(victim, attacker, damage cause of event)
+            set {_mul} to fctrpg_type_multiplier({_dtype}, fctrpg_enemy_type(victim))
+            # Racial trait voice on top of the matrix (30_mechanics/racial_traits.sk)
+            set {_mul} to ({_mul} * fctrpg_offense_modifier(attacker, fctrpg_enemy_type(victim)))
+            if attacker is holding a sword, axe or mace:
+                set {_atk} to fctrpg_effective(attacker, "might")
+                set {_mas} to fctrpg_mastery_level(attacker, "swordsmanship")
+                set damage of event to ((damage of event) * (1 + ({_atk} * 0.04) + ({_mas} * 0.02)) * {_mul})
+            else if attacker is holding a bow or crossbow:
+                set {_agi} to fctrpg_effective(attacker, "agility")
+                set {_arc} to fctrpg_mastery_level(attacker, "archery")
+                set damage of event to ((damage of event) * (1 + ({_agi} * 0.03) + ({_arc} * 0.02)) * {_mul})
+            else:
+                # Unarmed / misc still feeds the type matrix (emergent builds!)
+                set damage of event to ((damage of event) * {_mul})
+        # Resource loop + conditions + mastery accrual
+        fctrpg_player_attack_event(attacker, victim, damage cause of event)
+        stop
+    # --- Players taking damage: ledger + trait modifiers ---
+    victim is a player:
+        if {fctrpg::char::%victim's uuid%::status} is "active":
+            fctrpg_aegis_record(victim, damage)
+            # Abjurer line: incoming damage converts to essence (Const. #14)
+            if fctrpg_line(victim) is "abjurer":
+                fctrpg_res_set(victim, "essence", (fctrpg_res(victim, "essence") + (damage * 1.5)))
+            fctrpg_apply_defense_modifiers(victim, attacker)
+
+function fctrpg_player_attack_event(atkr: player, vtc: living entity, dcause: damage cause):
+    if not fctrpg_is_created(arg(1)):
+        stop
+    set {_dtype} to fctrpg_damage_type(arg(1), arg(2), arg(3))
+    if arg(1) is holding a sword, axe or mace:
+        # Damage scaling happens in the damage event above (matrix + stats).
+        # This branch handles the RESOURCE loop and condition application.
+        # Warrior momentum generation (resource loop, Const. #23)
+        if fctrpg_class(arg(1)) is "warrior":
+            fctrpg_res_set(arg(1), "momentum", (fctrpg_res(arg(1), "momentum") + 8))
+        # Mage melee channeling refunds small essence (interaction, Const. #2)
+        else if fctrpg_class(arg(1)) is "mage":
+            fctrpg_res_set(arg(1), "essence", (fctrpg_res(arg(1), "essence") + 2))
+        # Condition application by damage type (Const. #39)
+        if {_dtype} is "fire":
+            add 4 seconds of burning given by amplifier 0 to arg(2)
+        # Mastery accrual — fighting develops martial axes
+        fctrpg_mastery_gain(arg(1), "swordsmanship", 2)
+    else if arg(1) is holding a bow or crossbow:
+        # Archer focus generation; scaling handled in damage event.
+        if fctrpg_class(arg(1)) is "archer":
+            fctrpg_res_set(arg(1), "focus", (fctrpg_res(arg(1), "focus") + 12))
+        fctrpg_mastery_gain(arg(1), "archery", 2)
+
+function fctrpg_apply_defense_modifiers(p: player, src: entity):
+    set {_etype} to fctrpg_enemy_type(arg(2))
+    set {_race} to fctrpg_race(arg(1))
+    # Dwarrow stoneblood: +damage vs constructs/undead handled offensively;
+    # defensively they take reduced bludgeoning via vitality bonus health.
+    # Fae iron weakness: extra damage from iron weapons (searches tool).
+    if {_race} is "fae":
+        if arg(2) is a player:
+            if tool of arg(2) is an iron sword or iron axe:
+                make arg(1) execute console command "damage entity %arg(1)% 2 heart"
+    # Revenant: half healing, but resistance to bleed/poison (see conditions)
+    # Voidborn: corruption accumulates when hit by void damage (mechanics file)
+
+# ------------------------------------------------------------
+# Kill handling: mastery + first-kill discovery (Const. #44/#45)
+# ------------------------------------------------------------
+on death of living entity:
+    attacker is a player
+    set {_killer} to attacker
+    if not fctrpg_is_created({_killer}):
+        stop
+    set {_etype} to fctrpg_enemy_type(event-entity)
+    fctrpg_mastery_gain({_killer}, "creature_slaying_%{_etype}%", 3)
+    # First encounter knowledge (discovery is progression, Const. #10/#44)
+    if not fctrpg_knows({_killer}, "bestiary_%{_etype}%"):
+        fctrpg_learn({_killer}, "bestiary_%{_etype}%")
+        send "&8» &7You begin to understand &o%{_etype}%&r&7 creatures." to {_killer}
+    # Seeker insight generation on kills (resource ↔ system link)
+    if fctrpg_class({_killer}) is "seeker":
+        fctrpg_res_set({_killer}, "insight", (fctrpg_res({_killer}, "insight") + 5))
+
+# ------------------------------------------------------------
+# Death transaction — ONE coherent path (Constitution #47)
+# Region danger tier read from datapack scoreboards later;
+# for now: world spawn radius = moderate, beyond = dangerous.
+# ------------------------------------------------------------
+function fctrpg_death_tier(p: player) :: text:
+    set {_loc} to location of arg(1)
+    set {_spawn} to location of world "world"
+    if distance between {_loc} and {_spawn} < 500:
+        return "moderate"
+    return "dangerous"
+
+on death of player:
+    # Region resolver (50_world/regions.sk) is authoritative when a
+    # region claim exists; distance heuristic is the fallback (#68).
+    set {_tier} to fctrpg_region_death_tier(player)
+    if {_tier} is "dangerous":
+        # Material possessions carried by the player drop on death.
+        drop player's inventory at location of player without animation
+        clear player's inventory
+        set {fctrpg::char::%player's uuid%::res::essence} to 0
+        send "&c&lLOSS. &7The dangerous land took what you carried. Your body remembers nothing." to player
+    else:
+        # Moderate/safe: retain possessions, smaller progression penalty:
+        # half of current mastery XP in every path is lost
+        # (levels are safe — progress isn't).
+        loop indices of {fctrpg::char::%player's uuid%::mastery::*}:
+            set {fctrpg::char::%player's uuid%::mastery::%loop-index%::xp} to floor(({fctrpg::char::%player's uuid%::mastery::%loop-index%::xp} or 0) / 2)
+        send "&eYou fell, but the relative lands spare your belongings." to player
+    wait 3 seconds
+    if player is online:
+        make player execute command "spawn"
+
+# Essence regen tick — bounded, event-cheap (Constitution #71)
+every 2 seconds:
+    loop all players:
+        if {fctrpg::char::%loop-player-1's uuid%::status} is "active":
+            set {_reg} to (1 + (fctrpg_effective(loop-player, "vitality") * 0.2))
+            fctrpg_res_set(loop-player, "essence", (fctrpg_res(loop-player, "essence") + {_reg}))
+            # Momentum decays out of combat
+            if loop-player's last damage taken > 5 seconds ago:
+                fctrpg_res_set(loop-player, "momentum", max(0, fctrpg_res(loop-player, "momentum") - 4))

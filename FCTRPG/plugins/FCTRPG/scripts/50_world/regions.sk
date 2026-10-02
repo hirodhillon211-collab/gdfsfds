@@ -1,0 +1,143 @@
+# ============================================================
+# FCTRPG :: 50_world/regions.sk
+# Regions, danger tiers and realm identity (Const. #46/#52).
+#
+# ONE authoritative region resolver: {fctrpg::region::<chunk>}
+# written by the /fcregion claim tool + datapack markers.
+# Everything else (death tier, hazards, voidborn corruption,
+# merchant prices later) READS this — never re-derives.
+#
+# Danger tiers (Const. #46/#47):
+#   safe       — settlement; no loss on death
+#   moderate   — wilderness; mastery-XP-only death penalty
+#   dangerous  — realm frontier; possessions drop on death
+# The draw is explicit: rare materials/knowledge/bosses live
+# where dying actually costs something.
+# ============================================================
+
+# ------------------------------------------------------------
+# Region definition table (data-driven, Const. #69).
+# Format: key|display|tier|drawPhrase|hazardKey
+# ------------------------------------------------------------
+function fctrpg_region_table() :: list of strings:
+    return:
+        - "verdant_mark|The Verdant Mark|moderate|Starting region; Sylvan presence; gentle mastery growth|none"
+        - "ashfall_reaches|Ashfall Reaches|dangerous|Rare fire materials (embersteel); Draconic remnants; boss roost|burning_ground"
+        - "deep_coil|The Deep Coil|dangerous|Submerged ruins; frostiron veins; Deepborn territory|pressure_dark"
+        - "hollow_expanse|Hollow Expanse|dangerous|Void anomalies; shadowglass/voidite; unstable magic; discoveries|corruption_fields"
+        - "heartland|The Heartland|safe|Trade crossroads; forges; appraisal halls|none"
+
+on load:
+    loop fctrpg_region_table():
+        set {_p::*} to split loop-value at "|"
+        set {fctrpg::reg::region::%{_p[1]}%::*} to {_p::*}
+    send "&8[FCTRPG] &7Region table loaded: %size of fctrpg_region_table()% regions." to console
+
+function fctrpg_region_of(p: player) :: text:
+    return ({fctrpg::region::%arg(1)'s chunk%} or "unclaimed")
+
+function fctrpg_region_tier(loc: location) :: text:
+    set {_key} to {fctrpg::region::%{_loc}'s chunk%}
+    if {_key} is not set:
+        # Unclaimed land defaults by distance from spawn so the
+        # death transaction (#47) always has an honest answer.
+        if distance between {_loc} and location of world "world" < 500:
+            return "moderate"
+        return "dangerous"
+    return {fctrpg::reg::region::%{_key}%::3}
+
+# ------------------------------------------------------------
+# Admin/staging claim tool: marks a 3x3 chunk area around the
+# player's chunk as belonging to a region key.
+# ------------------------------------------------------------
+command /fcregion <text>:
+    permission: fctrpg.admin
+    description: Claim surrounding chunks for a region key
+    trigger:
+        set {_key} to "%arg(1)%" parsed as text
+        if {fctrpg::reg::region::%{_key}%} is not set:
+            send "&cUnknown region &f%{_key}%&c. See fctrpg_region_table()."
+            stop
+        loop integers from -1 to 1:
+            set {_dx} to loop-value
+            loop integers from -1 to 1:
+                set {_dz} to loop-value
+                set {_cx} to (player's chunk's x + {_dx})
+                set {_cz} to (player's chunk's z + {_dz})
+                set {fctrpg::region::%chunk at ({_cx} * 16), 64, ({_cz} * 16) in player's world%} to {_key}
+        send "&aClaimed 3×3 chunks for &f%{fctrpg::reg::region::%{_key}%::2}%&a (%{_key}%)."
+
+# Enter/leave announcements — identity through atmosphere only
+# (Const. #52 "why am I going here", told once, never nagged).
+on chunk transition:
+    set {_in} to {fctrpg::region::%to-chunk%}
+    set {_out} to {fctrpg::region::%from-chunk%}
+    if {_in} is not {_out}:
+        if {_in} is set:
+            set {_disp} to {fctrpg::reg::region::%{_in}%::2}
+            set {_tier} to {fctrpg::reg::region::%{_in}%::3}
+            set {_draw} to {fctrpg::reg::region::%{_in}%::4}
+            if {_tier} is "dangerous":
+                send "&c⚠ &f%{_disp}&c — %{_draw}% &7Here, death takes what you carry." to player
+            else if {_tier} is "safe":
+                send "&a%{_disp}% &7— %{_draw}%" to player
+            else:
+                send "&e%{_disp}% &7— %{_draw}%" to player
+            # First entry knowledge flag (Const. #44 exploration)
+            if not fctrpg_knows(player, "visited_%{_in}%"):
+                fctrpg_learn(player, "visited_%{_in}%")
+                fctrpg_mastery_gain(player, "exploration", 3)
+
+# ------------------------------------------------------------
+# HAZARD TICKS — bounded per-region effects while standing in
+# a hazardous region (Const. #52 environmental mechanics).
+# Only players inside a claimed region are touched (#71).
+# ------------------------------------------------------------
+every 4 seconds:
+    loop all players:
+        if {fctrpg::char::%loop-player-1's uuid%::status} is "active":
+            set {_key} to {fctrpg::region::%loop-player's chunk%}
+            if {_key} is set:
+                fctrpg_hazard_tick(loop-player, {fctrpg::reg::region::%{_key}%::5})
+
+function fctrpg_hazard_tick(p: player, hazard: text):
+    if arg(2) is "burning_ground":
+        # Ashfall: exposed flesh chars; fire resistance helps (matrix reuse)
+        if arg(1) has potion effect given by fire resistance:
+            stop
+        damage arg(1) by 1 with fire damage
+    else if arg(2) is "pressure_dark":
+        # Deep Coil: lightless pressure drains essence steadily
+        fctrpg_res_set(arg(1), "essence", max(0, (fctrpg_res(arg(1), "essence") - 2)))
+        if sky light of arg(1) <= 1:
+            add 4 seconds of night vision given by amplifier 0 to arg(1)
+    else if arg(2) is "corruption_fields":
+        # Hollow Expanse: ambient corruption for everyone (risk economy)
+        set {fctrpg::cond::corruption::%arg(1)'s uuid%} to (({fctrpg::cond::corruption::%arg(1)'s uuid%} or 0) + 1)
+
+# ------------------------------------------------------------
+# Wire the death transaction (Const. #47) to real region data.
+# combat.sk's death handler now consults THIS resolver first.
+# (Hook call lives in combat.sk; the logic stays here — #68.)
+# ------------------------------------------------------------
+function fctrpg_region_death_tier(p: player) :: text:
+    set {_key} to {fctrpg::region::%arg(1)'s chunk%}
+    if {_key} is set:
+        return "%{fctrpg::reg::region::%{_key}%::3}%"
+    return fctrpg_death_tier(arg(1))
+
+# ------------------------------------------------------------
+# Rare-material seeding in dangerous regions (Const. #46 draw).
+# Mining iron ore in a dangerous region has a chance to yield
+# forge stock instead of plain iron — the pull toward risk.
+# ------------------------------------------------------------
+on break of iron ore:
+    set {_key} to {fctrpg::region::%chunk of event-block%}
+    if {_key} is set:
+        if {fctrpg::reg::region::%{_key}%::3} is "dangerous":
+            if random integer out of 5 is 0:
+                set {_pick} to random element of fctrpg_registry_materials()
+                set {_p::*} to split {_pick} at "|"
+                clear dropped blocks
+                give {fctrpg::reg::material::%{_p[1]}%::oreitem} to player
+                send "&b✦ The vein was richer than it looked: &fOre of %{_p[2]}%&b."

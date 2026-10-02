@@ -1,0 +1,174 @@
+# ============================================================
+# FCTRPG :: 00_core/state.sk
+# Authoritative persistent state schema + lifecycle (Const. #68, #75)
+#
+# ONE authoritative location for every concept:
+#   {fctrpg::char::<uuid>::race}            race key
+#   {fctrpg::char::<uuid>::racial::*}       forged racial configuration
+#   {fctrpg::char::<uuid>::stats::*}        earned character stats
+#   {fctrpg::char::<uuid>::class}           class key
+#   {fctrpg::char::<uuid>::line}            line key
+#   {fctrpg::char::<uuid>::res::<key>}      current resource values
+#   {fctrpg::char::<uuid>::mastery::<path>} Destiny Board levels
+#   {fctrpg::char::<uuid>::know::<topic>}   knowledge/discovery flags
+#   {fctrpg::char::<uuid>::created}         first-join timestamp
+#   {fctrpg::region::<chunk>}                region key per chunk (50_world/regions.sk)
+#   {fctrpg::reg::region::<key>::<field>}    loaded region table rows (50_world/regions.sk)
+#   {fctrpg::item::<serial>::<field>}        forged-item ledger (40_items/forging.sk + appraisal.sk)
+#   {fctrpg::char::<uuid>::forge::heat}      per-player forge session heat (40_items/forging.sk)
+#
+# Derived (NON-persistent, recomputed) caches live in
+#   {fctrpg::cache::<uuid>::*} and are rebuilt on load/reload.
+# ============================================================
+
+on load:
+    # Rebuild derived caches lazily; nothing to persist here.
+    set {fctrpg::state::ready} to true
+    send "&8[FCTRPG] &7State core ready (schema v%{fctrpg::db.version}%)." to console
+
+on script unload:
+    delete {fctrpg::state::ready}
+
+# ------------------------------------------------------------
+# Lifecycle: first join initializes ONLY the minimal identity.
+# Other systems reveal themselves gradually (Constitution #11, #79).
+# ------------------------------------------------------------
+on join:
+    if {fctrpg::char::%player's uuid%} is not set:
+        fctrpg_init_character(player)
+
+on quit:
+    # Flush dirty session caches (bounded writes — Constitution #71).
+    delete {fctrpg::cache::%player's uuid%::*}
+
+# ------------------------------------------------------------
+# Public API
+# ------------------------------------------------------------
+function fctrpg_init_character(p: player):
+    set {fctrpg::char::%arg(1)%::created} to now
+    set {fctrpg::char::%arg(1)%::race} to "none"
+    set {fctrpg::char::%arg(1)%::class} to "none"
+    set {fctrpg::char::%arg(1)%::line} to "none"
+    set {fctrpg::char::%arg(1)%::status} to "needs_creation"
+    set {fctrpg::char::%arg(1)%::res::essence} to 100
+    set {fctrpg::char::%arg(1)%::dbversion} to 1
+    # Mark discovery: the game teaches through play (Const. #11)
+    wait 40 ticks
+    if arg(1) is online:
+        send "&6&lFCTRPG &7— You arrive. The world was already here. &e/rpg&7 to begin your identity." to arg(1)
+
+function fctrpg_is_created(p: player) :: boolean:
+    return {fctrpg::char::%arg(1)%::status} is not "needs_creation"
+
+function fctrpg_race(p: player) :: text:
+    return {fctrpg::char::%arg(1)%::race}
+
+function fctrpg_class(p: player) :: text:
+    return {fctrpg::char::%arg(1)%::class}
+
+function fctrpg_line(p: player) :: text:
+    return {fctrpg::char::%arg(1)%::line}
+
+# Stat read with default (racial + earned combined via derived API below)
+function fctrpg_stat(p: player, stat: text) :: number:
+    return ({fctrpg::char::%arg(1)%::stats::%arg(2)%} or 0)
+
+function fctrpg_racial(p: player, field: text) :: number:
+    return ({fctrpg::char::%arg(1)%::racial::%arg(2)%} or 0)
+
+# Effective stat = racial foundation + earned character stat (Const. #7/#8)
+function fctrpg_effective(p: player, stat: text) :: number:
+    return (fctrpg_racial(arg(1), arg(2)) + fctrpg_stat(arg(1), arg(2)))
+
+# Mastery (Destiny Board axis) read/level (Const. #9)
+function fctrpg_mastery_level(p: player, path: text) :: number:
+    return ({fctrpg::char::%arg(1)%::mastery::%arg(2)%::level} or 0)
+
+function fctrpg_mastery_xp(p: player, path: text) :: number:
+    return ({fctrpg::char::%arg(1)%::mastery::%arg(2)%::xp} or 0)
+
+# XP curve is deliberately soft: mastery gates possibilities, not raw numbers.
+function fctrpg_mastery_xp_needed(level: number) :: number:
+    return floor((10 + (arg(1) * arg(1) * 2)))
+
+# Emit mastery progress. Level-ups fire an event other systems consume.
+function fctrpg_mastery_gain(p: player, path: text, amount: number):
+    set {_lvl} to fctrpg_mastery_level(arg(1), arg(2))
+    set {_old} to fctrpg_mastery_level(arg(1), arg(2))
+    set {_xp} to (fctrpg_mastery_xp(arg(1), arg(2)) + arg(3))
+    loop 50 times:
+        if {_xp} >= fctrpg_mastery_xp_needed({_lvl}):
+            set {_xp} to ({_xp} - fctrpg_mastery_xp_needed({_lvl}))
+            set {_lvl} to ({_lvl} + 1)
+        else:
+            exit loop
+    set {fctrpg::char::%arg(1)%::mastery::%arg(2)%::xp} to {_xp}
+    set {fctrpg::char::%arg(1)%::mastery::%arg(2)%::level} to {_lvl}
+    if {_lvl} > {_old}:
+        send "&a✧ &7Mastery: &f%arg(2)%&a reached level &f%{_lvl}%" to arg(1)
+        # Invisible tether hook (Constitution #10): related paths get a whisper.
+        fctrpg_tether_hint(arg(1), arg(2), {_lvl})
+
+# Resource API (Constitution #23). Essence is universal.
+function fctrpg_res_max(p: player, res: text) :: number:
+    if arg(2) is "essence":
+        return (100 + (fctrpg_effective(arg(1), "vitality") * 5))
+    # Class resources: flat caps for now; lines refine them later.
+    return 100
+
+function fctrpg_res(p: player, res: text) :: number:
+    return ({fctrpg::char::%arg(1)%::res::%arg(2)%} or 0)
+
+function fctrpg_res_set(p: player, res: text, value: number):
+    set {_max} to fctrpg_res_max(arg(1), arg(2))
+    set {fctrpg::char::%arg(1)%::res::%arg(2)%} to max(0, min({_max}, arg(3)))
+
+function fctrpg_res_spend(p: player, res: text, cost: number) :: boolean:
+    if fctrpg_res(arg(1), arg(2)) >= arg(3):
+        fctrpg_res_set(arg(1), arg(2), (fctrpg_res(arg(1), arg(2)) - arg(3)))
+        return true
+    return false
+
+# Knowledge / discovery flag (Constitution #44). Hidden until learned.
+function fctrpg_knows(p: player, topic: text) :: boolean:
+    return {fctrpg::char::%arg(1)%::know::%arg(2)%} is set
+
+function fctrpg_learn(p: player, topic: text):
+    if not fctrpg_knows(arg(1), arg(2)):
+        set {fctrpg::char::%arg(1)%::know::%arg(2)%} to now
+        send "&d✦ &7You have discovered something new: &f%arg(2)%" to arg(1)
+
+# ------------------------------------------------------------
+# Invisible Tether hints (Constitution #10)
+# Data-driven: discovering one path whispers about linked paths.
+# Format of links: pathA>pathB|pathA>pathC
+# ------------------------------------------------------------
+function fctrpg_tether_links(path: text) :: list of strings:
+    if arg(1) is "swordsmanship":
+        return ("weapon_knowledge", "forging")
+    else if arg(1) is "weapon_knowledge":
+        return ("metallurgy", "appraisal")
+    else if arg(1) is "forging":
+        return ("materials", "appraisal")
+    else if arg(1) is "archery":
+        return ("tracking", "weak_points")
+    else if arg(1) is "magic":
+        return ("essence_theory", "conditions")
+    else if arg(1) is "alchemy":
+        return ("materials", "conditions")
+    else if arg(1) is "appraisal":
+        return ("relic_knowledge")
+    else if arg(1) is "exploration":
+        return ("cartography", "danger_sense")
+    else:
+        return {}
+
+function fctrpg_tether_hint(p: player, path: text, level: number):
+    loop fctrpg_tether_links(arg(2)):
+        # Only hint when the neighbor is untouched — preserve discovery feel.
+        if not fctrpg_knows(arg(1), "tether_seen_%loop-value%"):
+            if fctrpg_mastery_level(arg(1), loop-value) is 0:
+                if arg(3) >= 3:
+                    set {fctrpg::char::%arg(1)%::know::tether_seen_%loop-value%} to now
+                    send "&8» &7Something about your %arg(2)% reminds you of &o%loop-value%&r&7..." to arg(1)
+                stop loop
